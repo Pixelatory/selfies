@@ -1,5 +1,24 @@
 use std::{fmt, str::Chars};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+use crate::mol_graph::{Atom, MolecularGraph};
+use crate::constants::{AROMATIC_SUBSET, ORGANIC_SUBSET, ELEMENTS};
+use crate::utilities::{capitalize_first};
+
+static SMILES_BRACKETED_ATOM_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(
+r"(?x)
+    ^[\[]                     # opening square bracket [
+    (\d*)                     # isotope number (optional, e.g. 123, 26)
+    ([A-Za-z][a-z]?)          # element symbol
+    ([@]{0,2})                # chiral_tag (optional, only @ and @@ supported)
+    ((?:[H]\d?)?)             # H count (optional, e.g. H, H0, H3)
+    ((?:[+]+|[-]+|[+-]\d+)?)  # charge (optional, e.g. ---, +1, ++)
+    ((?:[:]\d+)?)             # atom class (optional, e.g. :12, :1)
+    []]                       # closing square bracket ]
+").unwrap());
+
 // ---------- Enums ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +107,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
         let chars: Vec<char> = smiles.chars().collect();
         let mut i = self.i;
 
-        while i < chars.len() {
+        /*while i < chars.len() {
             let ch = chars[i];
 
             // DOT.
@@ -231,8 +250,165 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
 
             self.i = token.end_idx;
             return Some(Ok(token));
-        }
+        }*/
 
         None
     }
 }
+
+
+/// Reads an atom from its SMILES representation.
+fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
+    let chars: Vec<char> = atom_symbol.chars().collect();
+
+    if ORGANIC_SUBSET.contains(atom_symbol) {
+        return Some(Atom{element: atom_symbol.to_string(), is_aromatic: false, isotope: None, chirality: None, h_count: 0, charge: 0});
+    } else if AROMATIC_SUBSET.contains(atom_symbol) {
+        return Some(Atom{element: atom_symbol.to_string(), is_aromatic: true, isotope: None, chirality: None, h_count: 0, charge: 0});
+    } else if !(*chars.first()? == '[' && *chars.last()? == ']') {
+        return None;
+    }
+
+    let matches: Vec<(&str, &str, &str, &str, &str, &str)> = SMILES_BRACKETED_ATOM_PATTERN
+        .captures_iter(atom_symbol)
+        .map(|caps| 
+        (
+            caps.get(1).map_or("", |m| m.as_str()), // isotope
+            caps.get(2).map_or("", |m| m.as_str()), // element
+            caps.get(3).map_or("", |m| m.as_str()), // chiral tag
+            caps.get(4).map_or("", |m| m.as_str()), // hydrogens
+            caps.get(5).map_or("", |m| m.as_str()), // charge
+            caps.get(6).map_or("", |m| m.as_str()), // atom class
+        )
+    )
+        .collect();
+    
+    if matches.is_empty() {
+        return None;
+    }
+    let (
+        isotope_str,
+        element_match,
+        chirality_match,
+        h_count_match,
+        charge_match,
+        _,
+    ) = matches.first()?;
+    
+
+    let isotope = match isotope_str.is_empty() {
+        false => Some(isotope_str.parse::<i32>().ok()?),
+        true => None,
+    };
+    let is_aromatic = element_match.chars().all(|c| c.is_ascii_lowercase())
+        && AROMATIC_SUBSET.contains(element_match);
+    let element = capitalize_first(element_match);
+    if !ELEMENTS.contains(&element.as_str()) {
+        return None;
+    }
+
+    let chirality = match chirality_match.is_empty() {
+        false => Some(chirality_match.to_string()),
+        true => None,
+    };
+
+    let h_count = match h_count_match.is_empty() {
+        false => {
+            let h_count_suffix = h_count_match.strip_prefix("H")?;
+            match h_count_suffix.is_empty() {
+                false => h_count_suffix.parse::<i32>().ok()?,
+                true => 1,
+            }
+        },
+        true => 0,
+    };
+
+    let charge = match charge_match.is_empty() {
+        false => {
+            let mut tmp_charge;
+            if charge_match.ends_with(|ch: char| ch.is_ascii_digit()) {
+                tmp_charge = charge_match
+                    .strip_prefix(|ch: char| ch == '+' || ch == '-')?
+                    .parse::<i32>()
+                    .ok()?;
+            } else {
+                tmp_charge = charge_match.len().try_into().ok()?;
+            }
+            if charge_match.starts_with('-') {
+                tmp_charge *= -1;
+            }
+            tmp_charge
+        },
+        true => 0,
+    };
+    
+    Some(
+        Atom { element, is_aromatic, isotope, chirality, h_count, charge }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_smiles_to_atom() {
+        // Element, h_count, and charge are filled out.
+        let x = smiles_to_atom("[OH3+]");
+        assert!(x.is_some());
+        assert_eq!(
+            x.unwrap(),
+            Atom{element: String::from("O"), is_aromatic: false, isotope: None, chirality: None, h_count: 3, charge: 1}
+        );
+        
+        // Charge counts the many negative symbols.
+        let x = smiles_to_atom("[Co---]");
+        assert!(x.is_some());
+        assert_eq!(
+            x.unwrap(),
+            Atom{element: String::from("Co"), is_aromatic: false, isotope: None, chirality: None, h_count: 0, charge: -3}
+        );
+
+        // Isotope and is_aromatic are filled out.
+        let x = smiles_to_atom("[14cH]");
+        assert!(x.is_some());
+        assert_eq!(
+            x.unwrap(),
+            Atom{element: String::from("C"), is_aromatic: true, isotope: Some(14), chirality: None, h_count: 1, charge: 0}
+        );
+
+        // Chirality is filled out.
+        let x = smiles_to_atom("[C@@H]");
+        assert!(x.is_some());
+        assert_eq!(
+            x.unwrap(),
+            Atom{element: String::from("C"), is_aromatic: false, isotope: None, chirality: Some(String::from("@@")), h_count: 1, charge: 0}
+        );
+
+        // Unknown element.
+        let x = smiles_to_atom("[Zh++]");
+        assert!(x.is_none());
+    }
+}
+
+
+/* Reads a molecular graph from a SMILES string.
+/// 
+/// #### Arguments
+/// - `smiles`: The input SMILES string.
+/// - `attributable`: If the molecular graph should include attributions.
+/// 
+/// #### Returns
+/// - A molecular graph that the input SMILES string represents, or
+///   a `SMILESParserError` if the input SMILES is invalid.
+*/
+/*fn smiles_to_mol(smiles: &str, attributable: bool) -> Result<MolecularGraph, SMILESParserError> {
+    if smiles == "" {
+        return Err(SMILESParserError{smiles: smiles.to_string(), message: "empty SMILES".to_string(), index: 0});
+    }
+    let mol = MolecularGraph
+}
+
+fn derive_mol_from_tokens(mol: MolecularGraph, smiles: &str, tokens: Vec<SMILESToken>, i: i32) {
+
+}*/
