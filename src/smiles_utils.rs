@@ -31,7 +31,7 @@ pub enum SMILESTokenType {
 
 // ---------- Token Struct ----------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SMILESToken {
     pub bond_idx: Option<usize>,
     pub start_idx: usize,
@@ -107,7 +107,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
         let chars: Vec<char> = smiles.chars().collect();
         let mut i = self.i;
 
-        /*while i < chars.len() {
+        while i < chars.len() {
             let ch = chars[i];
 
             // DOT.
@@ -250,7 +250,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
 
             self.i = token.end_idx;
             return Some(Ok(token));
-        }*/
+        }
 
         None
     }
@@ -388,6 +388,38 @@ mod tests {
         // Unknown element.
         let x = smiles_to_atom("[Zh++]");
         assert!(x.is_none());
+    }
+
+    #[test]
+    fn test_smiles_tokenizer() {
+        // The molecule is not structurally sound, but let's care more about testing the tokenization logic
+        // than the molecular validity.
+        let x = SMILESTokenizer::new("C(Br)C=O.N#C1CC1Cl[2FeH+++]%10CC%10");
+        let tokens: Vec<SMILESToken> = x.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        let expected_tokens = Vec::from(
+            [
+                SMILESToken{bond_idx: None, start_idx: 0, end_idx: 1, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_idx: None, start_idx: 1, end_idx: 2, token_type: SMILESTokenType::Branch, token: String::from("(")},
+                SMILESToken{bond_idx: None, start_idx: 2, end_idx: 4, token_type: SMILESTokenType::Atom, token: String::from("Br")},
+                SMILESToken{bond_idx: None, start_idx: 4, end_idx: 5, token_type: SMILESTokenType::Branch, token: String::from(")")},
+                SMILESToken{bond_idx: None, start_idx: 5, end_idx: 6, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_idx: Some(6), start_idx: 7, end_idx: 8, token_type: SMILESTokenType::Atom, token: String::from("O")},
+                SMILESToken{bond_idx: None, start_idx: 8, end_idx: 9, token_type: SMILESTokenType::Dot, token: String::from(".")},
+                SMILESToken{bond_idx: None, start_idx: 9, end_idx: 10, token_type: SMILESTokenType::Atom, token: String::from("N")},
+                SMILESToken{bond_idx: Some(10), start_idx: 11, end_idx: 12, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_idx: None, start_idx: 12, end_idx: 13, token_type: SMILESTokenType::Ring, token: String::from("1")},
+                SMILESToken{bond_idx: None, start_idx: 13, end_idx: 14, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_idx: None, start_idx: 14, end_idx: 15, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_idx: None, start_idx: 15, end_idx: 16, token_type: SMILESTokenType::Ring, token: String::from("1") },
+                SMILESToken{bond_idx: None, start_idx: 16, end_idx: 18, token_type: SMILESTokenType::Atom, token: String::from("Cl") },
+                SMILESToken{bond_idx: None, start_idx: 18, end_idx: 27, token_type: SMILESTokenType::Atom, token: String::from("[2FeH+++]") },
+                SMILESToken{bond_idx: None, start_idx: 27, end_idx: 30, token_type: SMILESTokenType::Ring, token: String::from("%10") },
+                SMILESToken{bond_idx: None, start_idx: 30, end_idx: 31, token_type: SMILESTokenType::Atom, token: String::from("C") },
+                SMILESToken{bond_idx: None, start_idx: 31, end_idx: 32, token_type: SMILESTokenType::Atom, token: String::from("C") },
+                SMILESToken{bond_idx: None, start_idx: 32, end_idx: 35, token_type: SMILESTokenType::Ring, token: String::from("%10") },
+            ]
+        );
+        assert_eq!(tokens, expected_tokens);
     }
 }
 
