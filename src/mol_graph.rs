@@ -1,5 +1,7 @@
 use std::{collections::HashMap, iter::Map};
 
+use crate::smiles_utils::SMILESToken;
+
 
 /// A molecular graph.
 /// 
@@ -7,11 +9,11 @@ use std::{collections::HashMap, iter::Map};
 /// and SELFIES strings are more naturally represented as weighted directed
 /// graphs, where the direction of the edges specifies the order of atoms
 /// and bonds in the string.
-pub struct MolecularGraph {
+pub struct MolecularGraph<'atom> {
     /// Stores root atoms, where traversal begins.
-    roots: Vec<i32>,
+    roots: Vec<usize>,
     /// Stores atoms in this graph.
-    atoms: Vec<i32>,
+    atoms: Vec<&'atom Atom>,
     /// Stores all bonds in this graph.
     bond_dict: Vec<i32>,
     /// Adjacency list, representing this graph.
@@ -27,7 +29,7 @@ pub struct MolecularGraph {
     attributable: bool,
 }
 
-impl MolecularGraph{
+impl<'atom> MolecularGraph<'atom>{
     pub fn new(attributable: bool) -> Self {
         Self {
             roots: Vec::new(),
@@ -45,10 +47,32 @@ impl MolecularGraph{
 
 #[derive(Debug, PartialEq)]
 pub struct Atom {
+    pub index: Option<usize>,
     pub element: String,
     pub is_aromatic: bool,
     pub isotope: Option<i32>,
     pub chirality: Option<String>,
     pub h_count: i32,
     pub charge: i32,
+}
+
+impl Atom {
+    pub fn new(
+        element: String,
+        is_aromatic: bool,
+        isotope: Option<i32>,
+        chirality: Option<String>,
+        h_count: i32,
+        charge: i32,
+    ) -> Self {
+        Atom {
+            index: None,
+            element: element,
+            is_aromatic: is_aromatic,
+            isotope: isotope,
+            chirality: chirality,
+            h_count: h_count,
+            charge: charge,
+        }
+    }
 }

@@ -33,21 +33,11 @@ pub enum SMILESTokenType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SMILESToken {
-    pub bond_idx: Option<usize>,
+    pub bond_token: Option<char>,
     pub start_idx: usize,
     pub end_idx: usize,
     pub token_type: SMILESTokenType,
     pub token: String,
-}
-
-impl SMILESToken {
-    pub fn extract_bond_char(&self, smiles: &str) -> Option<char> {
-        self.bond_idx.and_then(|i| smiles.chars().nth(i))
-    }
-
-    pub fn extract_symbol<'a>(&self, smiles: &'a str) -> &'a str {
-        &smiles[self.start_idx..self.end_idx]
-    }
 }
 
 impl fmt::Display for SMILESToken {
@@ -113,7 +103,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             // DOT.
             if ch == '.' {
                 let token = SMILESToken {
-                    bond_idx: None,
+                    bond_token: None,
                     start_idx: i,
                     end_idx: i + 1,
                     token_type: SMILESTokenType::Dot,
@@ -124,11 +114,11 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             }
 
             // BOND.
-            let bond_idx = if SMILES_BOND_ORDERS.contains(&ch) {
+            let (bond_token, bond_idx) = if SMILES_BOND_ORDERS.contains(&ch) {
                 i += 1;
-                Some(i - 1)
+                (Some(ch), i-1)
             } else {
-                None
+                (None, i)
             };
 
             if i >= chars.len() {
@@ -151,7 +141,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                 };
                 if next_two == "Br" || next_two == "Cl" {
                     token = SMILESToken {
-                        bond_idx,
+                        bond_token,
                         start_idx: i,
                         end_idx: i + 2,
                         token_type: SMILESTokenType::Atom,
@@ -159,7 +149,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                     };
                 } else {
                     token = SMILESToken {
-                        bond_idx,
+                        bond_token,
                         start_idx: i,
                         end_idx: i + 1,
                         token_type: SMILESTokenType::Atom,
@@ -172,7 +162,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                 if let Some(r_idx) = smiles[i + 1..].find(']') {
                     let end_idx = i + r_idx + 2;
                     token = SMILESToken {
-                        bond_idx,
+                        bond_token,
                         start_idx: i,
                         end_idx,
                         token_type: SMILESTokenType::Atom,
@@ -188,15 +178,15 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
 
             // BRANCHES.
             } else if ch == '(' || ch == ')' {
-                if bond_idx.is_some() {
+                if bond_token.is_some() {
                     return Some(Err(SMILESParserError {
                         smiles: smiles.to_string(),
                         message: "hanging bond".to_string(),
-                        index: bond_idx.unwrap(),
+                        index: bond_idx,
                     }));
                 }
                 token = SMILESToken {
-                    bond_idx: None,
+                    bond_token: None,
                     start_idx: i,
                     end_idx: i + 1,
                     token_type: SMILESTokenType::Branch,
@@ -206,7 +196,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             // RINGS.
             } else if ch.is_ascii_digit() {
                 token = SMILESToken {
-                    bond_idx,
+                    bond_token,
                     start_idx: i,
                     end_idx: i + 1,
                     token_type: SMILESTokenType::Ring,
@@ -218,7 +208,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                     let rnum = &smiles[i + 1..i + 3];
                     if rnum.chars().all(|c| c.is_ascii_digit()) {
                         token = SMILESToken {
-                            bond_idx,
+                            bond_token,
                             start_idx: i,
                             end_idx: i + 3,
                             token_type: SMILESTokenType::Ring,
@@ -262,9 +252,9 @@ fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     let chars: Vec<char> = atom_symbol.chars().collect();
 
     if ORGANIC_SUBSET.contains(atom_symbol) {
-        return Some(Atom{element: atom_symbol.to_string(), is_aromatic: false, isotope: None, chirality: None, h_count: 0, charge: 0});
+        return Some(Atom::new(atom_symbol.to_string(),  false, None, None, 0, 0));
     } else if AROMATIC_SUBSET.contains(atom_symbol) {
-        return Some(Atom{element: atom_symbol.to_string(), is_aromatic: true, isotope: None, chirality: None, h_count: 0, charge: 0});
+        return Some(Atom::new(atom_symbol.to_string(), true, None, None, 0, 0));
     } else if !(*chars.first()? == '[' && *chars.last()? == ']') {
         return None;
     }
@@ -343,9 +333,11 @@ fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     };
     
     Some(
-        Atom { element, is_aromatic, isotope, chirality, h_count, charge }
+        Atom::new(element, is_aromatic, isotope, chirality, h_count, charge)
     )
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -358,7 +350,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom{element: String::from("O"), is_aromatic: false, isotope: None, chirality: None, h_count: 3, charge: 1}
+            Atom::new(String::from("O"), false, None, None, 3, 1)
         );
         
         // Charge counts the many negative symbols.
@@ -366,7 +358,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom{element: String::from("Co"), is_aromatic: false, isotope: None, chirality: None, h_count: 0, charge: -3}
+            Atom::new(String::from("Co"), false, None, None, 0, -3)
         );
 
         // Isotope and is_aromatic are filled out.
@@ -374,7 +366,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom{element: String::from("C"), is_aromatic: true, isotope: Some(14), chirality: None, h_count: 1, charge: 0}
+            Atom::new(String::from("C"), true, Some(14), None, 1, 0)
         );
 
         // Chirality is filled out.
@@ -382,7 +374,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom{element: String::from("C"), is_aromatic: false, isotope: None, chirality: Some(String::from("@@")), h_count: 1, charge: 0}
+            Atom::new(String::from("C"), false, None, Some(String::from("@@")), 1, 0)
         );
 
         // Unknown element.
@@ -398,25 +390,25 @@ mod tests {
         let tokens: Vec<SMILESToken> = x.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
         let expected_tokens = Vec::from(
             [
-                SMILESToken{bond_idx: None, start_idx: 0, end_idx: 1, token_type: SMILESTokenType::Atom, token: String::from("C")},
-                SMILESToken{bond_idx: None, start_idx: 1, end_idx: 2, token_type: SMILESTokenType::Branch, token: String::from("(")},
-                SMILESToken{bond_idx: None, start_idx: 2, end_idx: 4, token_type: SMILESTokenType::Atom, token: String::from("Br")},
-                SMILESToken{bond_idx: None, start_idx: 4, end_idx: 5, token_type: SMILESTokenType::Branch, token: String::from(")")},
-                SMILESToken{bond_idx: None, start_idx: 5, end_idx: 6, token_type: SMILESTokenType::Atom, token: String::from("C")},
-                SMILESToken{bond_idx: Some(6), start_idx: 7, end_idx: 8, token_type: SMILESTokenType::Atom, token: String::from("O")},
-                SMILESToken{bond_idx: None, start_idx: 8, end_idx: 9, token_type: SMILESTokenType::Dot, token: String::from(".")},
-                SMILESToken{bond_idx: None, start_idx: 9, end_idx: 10, token_type: SMILESTokenType::Atom, token: String::from("N")},
-                SMILESToken{bond_idx: Some(10), start_idx: 11, end_idx: 12, token_type: SMILESTokenType::Atom, token: String::from("C")},
-                SMILESToken{bond_idx: None, start_idx: 12, end_idx: 13, token_type: SMILESTokenType::Ring, token: String::from("1")},
-                SMILESToken{bond_idx: None, start_idx: 13, end_idx: 14, token_type: SMILESTokenType::Atom, token: String::from("C")},
-                SMILESToken{bond_idx: None, start_idx: 14, end_idx: 15, token_type: SMILESTokenType::Atom, token: String::from("C")},
-                SMILESToken{bond_idx: None, start_idx: 15, end_idx: 16, token_type: SMILESTokenType::Ring, token: String::from("1") },
-                SMILESToken{bond_idx: None, start_idx: 16, end_idx: 18, token_type: SMILESTokenType::Atom, token: String::from("Cl") },
-                SMILESToken{bond_idx: None, start_idx: 18, end_idx: 27, token_type: SMILESTokenType::Atom, token: String::from("[2FeH+++]") },
-                SMILESToken{bond_idx: None, start_idx: 27, end_idx: 30, token_type: SMILESTokenType::Ring, token: String::from("%10") },
-                SMILESToken{bond_idx: None, start_idx: 30, end_idx: 31, token_type: SMILESTokenType::Atom, token: String::from("C") },
-                SMILESToken{bond_idx: None, start_idx: 31, end_idx: 32, token_type: SMILESTokenType::Atom, token: String::from("C") },
-                SMILESToken{bond_idx: None, start_idx: 32, end_idx: 35, token_type: SMILESTokenType::Ring, token: String::from("%10") },
+                SMILESToken{bond_token: None, start_idx: 0, end_idx: 1, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_token: None, start_idx: 1, end_idx: 2, token_type: SMILESTokenType::Branch, token: String::from("(")},
+                SMILESToken{bond_token: None, start_idx: 2, end_idx: 4, token_type: SMILESTokenType::Atom, token: String::from("Br")},
+                SMILESToken{bond_token: None, start_idx: 4, end_idx: 5, token_type: SMILESTokenType::Branch, token: String::from(")")},
+                SMILESToken{bond_token: None, start_idx: 5, end_idx: 6, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_token: Some('='), start_idx: 7, end_idx: 8, token_type: SMILESTokenType::Atom, token: String::from("O")},
+                SMILESToken{bond_token: None, start_idx: 8, end_idx: 9, token_type: SMILESTokenType::Dot, token: String::from(".")},
+                SMILESToken{bond_token: None, start_idx: 9, end_idx: 10, token_type: SMILESTokenType::Atom, token: String::from("N")},
+                SMILESToken{bond_token: Some('#'), start_idx: 11, end_idx: 12, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_token: None, start_idx: 12, end_idx: 13, token_type: SMILESTokenType::Ring, token: String::from("1")},
+                SMILESToken{bond_token: None, start_idx: 13, end_idx: 14, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_token: None, start_idx: 14, end_idx: 15, token_type: SMILESTokenType::Atom, token: String::from("C")},
+                SMILESToken{bond_token: None, start_idx: 15, end_idx: 16, token_type: SMILESTokenType::Ring, token: String::from("1") },
+                SMILESToken{bond_token: None, start_idx: 16, end_idx: 18, token_type: SMILESTokenType::Atom, token: String::from("Cl") },
+                SMILESToken{bond_token: None, start_idx: 18, end_idx: 27, token_type: SMILESTokenType::Atom, token: String::from("[2FeH+++]") },
+                SMILESToken{bond_token: None, start_idx: 27, end_idx: 30, token_type: SMILESTokenType::Ring, token: String::from("%10") },
+                SMILESToken{bond_token: None, start_idx: 30, end_idx: 31, token_type: SMILESTokenType::Atom, token: String::from("C") },
+                SMILESToken{bond_token: None, start_idx: 31, end_idx: 32, token_type: SMILESTokenType::Atom, token: String::from("C") },
+                SMILESToken{bond_token: None, start_idx: 32, end_idx: 35, token_type: SMILESTokenType::Ring, token: String::from("%10") },
             ]
         );
         assert_eq!(tokens, expected_tokens);
@@ -439,8 +431,4 @@ mod tests {
         return Err(SMILESParserError{smiles: smiles.to_string(), message: "empty SMILES".to_string(), index: 0});
     }
     let mol = MolecularGraph
-}
-
-fn derive_mol_from_tokens(mol: MolecularGraph, smiles: &str, tokens: Vec<SMILESToken>, i: i32) {
-
 }*/
