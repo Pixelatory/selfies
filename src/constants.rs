@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}};
 
 use once_cell::sync::Lazy;
 
@@ -40,6 +40,22 @@ pub static AROMATIC_VALENCES: Lazy<HashMap<&'static str, ValenceTuple>> = Lazy::
         ("S", ValenceTuple::Two(2, 4)),
         ("Se", ValenceTuple::Two(2, 4)),
         ("Te", ValenceTuple::Two(2, 4)),
+    ]
+));
+
+pub static VALENCE_ELECTRONS: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| HashMap::from(
+    [
+        ("B", 3),
+        ("Al", 3),
+        ("C", 3),
+        ("Si", 4),
+        ("N", 5),
+        ("P", 5),
+        ("As", 5),
+        ("O", 6),
+        ("S", 6),
+        ("Se", 6),
+        ("Te", 6),
     ]
 ));
 

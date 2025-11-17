@@ -2,6 +2,7 @@ mod smiles_utils;
 mod mol_graph;
 mod constants;
 mod utilities;
+mod matching_utils;
 
 #[pyo3::pymodule]
 mod selfies_rust {
