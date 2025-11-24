@@ -55,6 +55,16 @@ pub struct SMILESParserError {
     pub index: usize,
 }
 
+impl SMILESParserError {
+    pub fn new(smiles: String, message: String, index: usize) -> Self {
+        Self {
+            smiles: smiles,
+            message: message,
+            index: index,
+        }
+    }
+}
+
 impl fmt::Display for SMILESParserError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -122,11 +132,11 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             };
 
             if i >= chars.len() {
-                return Some(Err(SMILESParserError {
-                    smiles: smiles.to_string(),
-                    message: "hanging bond".to_string(),
-                    index: i.saturating_sub(1),
-                }));
+                return Some(Err(SMILESParserError::new(
+                    smiles.to_string(),
+                    "hanging bond".to_string(),
+                    i.saturating_sub(1),
+                )));
             }
 
             let ch = chars[i];
@@ -169,21 +179,21 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                         token: smiles[i..end_idx].to_string(),
                     };
                 } else {
-                    return Some(Err(SMILESParserError {
-                        smiles: smiles.to_string(),
-                        message: "hanging bracket [".to_string(),
-                        index: i,
-                    }));
+                    return Some(Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "hanging bracket [".to_string(),
+                        i,
+                    )));
                 }
 
             // BRANCHES.
             } else if ch == '(' || ch == ')' {
                 if bond_token.is_some() {
-                    return Some(Err(SMILESParserError {
-                        smiles: smiles.to_string(),
-                        message: "hanging bond".to_string(),
-                        index: bond_idx,
-                    }));
+                    return Some(Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "hanging bond".to_string(),
+                        bond_idx,
+                    )));
                 }
                 token = SMILESToken {
                     bond_token: None,
@@ -215,27 +225,27 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                             token: smiles[i..i + 3].to_string(),
                         };
                     } else {
-                        return Some(Err(SMILESParserError {
-                            smiles: smiles.to_string(),
-                            message: format!("invalid ring number '%{}'", rnum),
-                            index: i,
-                        }));
+                        return Some(Err(SMILESParserError::new(
+                            smiles.to_string(),
+                            format!("invalid ring number '%{}'", rnum),
+                            i,
+                        )));
                     }
                 } else {
-                    return Some(Err(SMILESParserError {
-                        smiles: smiles.to_string(),
-                        message: "incomplete ring number".to_string(),
-                        index: i,
-                    }));
+                    return Some(Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "incomplete ring number".to_string(),
+                        i,
+                    )));
                 }
 
             // UNKNOWN SYMBOL.
             } else {
-                return Some(Err(SMILESParserError {
-                    smiles: smiles.to_string(),
-                    message: format!("unrecognized symbol '{}'", ch),
-                    index: i,
-                }));
+                return Some(Err(SMILESParserError::new(
+                    smiles.to_string(),
+                    format!("unrecognized symbol '{}'", ch),
+                    i,
+                )));
             }
 
             self.i = token.end_idx;

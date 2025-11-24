@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{constants::{AROMATIC_VALENCES, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::SMILESToken, utilities::last_valence};
+use crate::{constants::{AROMATIC_VALENCES, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenizer}, utilities::last_valence};
 
 
 /// A molecular graph.
@@ -23,6 +23,7 @@ pub struct MolecularGraph {
     /// Stores if an atom makes a ring bond.
     ring_bond_flags: Vec<bool>,
     /// Delocalization subgraph.
+    /// A mapping from 
     delocal_subgraph: HashMap<usize, Vec<usize>>,
     /// Attribution of each atom/bond.
     attribution: HashMap<i32, i32>,
@@ -30,7 +31,7 @@ pub struct MolecularGraph {
 }
 
 impl MolecularGraph{
-    pub fn new(attributable: bool) -> Self {
+    fn new(attributable: bool) -> Self {
         Self {
             roots: Vec::new(),
             atoms: Vec::new(),
@@ -47,7 +48,7 @@ impl MolecularGraph{
     /// Adds an atom to the molecular graph.
     /// 
     /// Returns the index of the inserted atom.
-    pub fn add_atom(mut self, atom: Atom, mark_root: bool) -> usize {
+    fn add_atom(mut self, atom: Atom, mark_root: bool) -> usize {
         let num_atoms = self.atoms.len();
         let mut atom = atom;
         atom.index = Some(num_atoms);
@@ -68,8 +69,10 @@ impl MolecularGraph{
         num_atoms
     }
 
-    pub fn add_bond(mut self, src: usize, dst: usize, order: f64, stereo: String) {
-        assert!(src < dst);
+    fn add_bond(mut self, src: usize, dst: usize, order: f64, stereo: String) {
+        if src >= dst {
+            panic!("Source must be less than destination.")
+        }
 
         let bond = DirectedBond::new(src, dst, order, Some(stereo), false);
         self.add_bond_at_loc(bond, None);
@@ -85,13 +88,13 @@ impl MolecularGraph{
         }
     }
 
-    pub fn add_placeholder_bond(mut self, src: usize) -> usize {
+    fn add_placeholder_bond(mut self, src: usize) -> usize {
         let out_edges = &mut self.adj_list[src];
         out_edges.push(None);
         out_edges.len() - 1
     }
 
-    pub fn add_ring_bond(
+    fn add_ring_bond(
         mut self,
         a: usize,
         b: usize,
@@ -118,8 +121,10 @@ impl MolecularGraph{
         }
     }
 
-    pub fn update_bond_order(mut self, a: usize, b: usize, new_order: f64) {
-        assert!(1.0 <= new_order && new_order <= 3.0);
+    fn update_bond_order(mut self, a: usize, b: usize, new_order: f64) {
+        if new_order < 1.0 || new_order > 3.0 {
+            panic!("new_order must be within [1.0, 3.0]");
+        }
         
         let mut a = a;
         let mut b = b;
@@ -281,9 +286,19 @@ impl Atom {
     }
 }
 
-fn create_mol_graph(attributable: bool, smiles: String, tokens: Vec<SMILESToken>) -> MolecularGraph {
-    let mut atom = Atom::new(String::from("ok"), false, None, None, 0, 0);
-    let mol = MolecularGraph::new(false);
-    //mol.add_atom(atom.clone(), false);
-    return mol
+/// Reads a molecular graph from a SMILES string.
+pub fn create_mol_graph(attributable: bool, smiles: &str) -> Result<MolecularGraph, SMILESParserError> {
+    if smiles.is_empty() {
+        return Err(SMILESParserError::new(smiles.to_string(), "Empty SMILES".to_string(), 0));
+    }
+    let mut mol = MolecularGraph::new(attributable);
+    let mut tokens: Vec<SMILESToken> = SMILESTokenizer::new(smiles).into_iter().collect::<Result<_, _>>()?;
+
+    let q = VecDeque::from(tokens);
+
+    return Ok(mol)
+}
+
+fn derive_mol_from_tokens(mol: &mut MolecularGraph, smiles: &str, tokens: &mut Vec<SMILESToken>) {
+    
 }

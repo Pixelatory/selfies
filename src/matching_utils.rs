@@ -78,10 +78,7 @@ fn greedy_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, usize>> {
         // candidate edges for matching.
         for adj in graph[node].iter().chain(graph[mate].iter()) {
             let adj = *adj;
-            if *free_degrees.get(adj)? == 0 {
-                continue;
-            }
-            free_degrees[adj] -= 1;
+            free_degrees[adj] = free_degrees[adj].saturating_sub(1);
             if !matching.contains_key(&adj) && *free_degrees.get(adj)? > 0 {
                 heap.push(Reverse((free_degrees[adj], adj)))
             }
