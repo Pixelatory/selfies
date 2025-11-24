@@ -252,7 +252,6 @@ impl DirectedBond {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Atom {
     pub index: Option<usize>,
-    // TODO: I think that element should be str instead of String. It's intended to be immutable on Atom.
     pub element: String,
     pub is_aromatic: bool,
     pub isotope: Option<i32>,
