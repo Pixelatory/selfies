@@ -1,7 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{constants::{AROMATIC_VALENCES, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenizer}, utilities::last_valence};
+use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::last_valence};
 
+
+struct Attribution {
+    /// Token index.
+    index: usize,
+    /// Token string.
+    token: String,
+}
+
+impl Attribution {
+    pub fn new(index: usize, token: String) -> Self {
+        Self {index, token}
+    }
+}
 
 /// A molecular graph.
 /// 
@@ -9,236 +22,63 @@ use crate::{constants::{AROMATIC_VALENCES, VALENCE_ELECTRONS, ValenceTuple}, smi
 /// and SELFIES strings are more naturally represented as weighted directed
 /// graphs, where the direction of the edges specifies the order of atoms
 /// and bonds in the string.
+#[derive(Debug)]
 pub struct MolecularGraph {
-    /// Stores root atoms, where traversal begins.
-    roots: Vec<usize>,
     /// Stores atoms in this graph.
     atoms: Vec<Atom>,
     /// Stores all bonds in this graph.
     bond_dict: HashMap<(usize, usize), DirectedBond>,
-    /// Adjacency list, representing this graph.
-    adj_list: Vec<Vec<Option<DirectedBond>>>,
-    /// Stores number of bonds an atom has made.
-    bond_counts: Vec<f64>,
-    /// Stores if an atom makes a ring bond.
-    ring_bond_flags: Vec<bool>,
-    /// Delocalization subgraph.
-    /// A mapping from 
-    delocal_subgraph: HashMap<usize, Vec<usize>>,
-    /// Attribution of each atom/bond.
-    attribution: HashMap<i32, i32>,
-    attributable: bool,
+    /// Adjacency list, representing this graph. Stores indices of atoms.
+    adj_list: Vec<HashSet<usize>>,
 }
 
 impl MolecularGraph{
     fn new(attributable: bool) -> Self {
         Self {
-            roots: Vec::new(),
             atoms: Vec::new(),
             bond_dict: HashMap::new(),
             adj_list: Vec::new(),
-            bond_counts: Vec::new(),
-            ring_bond_flags: Vec::new(),
-            delocal_subgraph: HashMap::new(),
-            attribution: HashMap::new(),
-            attributable,
         }
+    }
+
+    fn has_bond(&self, source: usize, destination: usize) -> bool {
+        self.bond_dict.contains_key(&(source, destination))
     }
 
     /// Adds an atom to the molecular graph.
     /// 
     /// Returns the index of the inserted atom.
-    fn add_atom(mut self, atom: Atom, mark_root: bool) -> usize {
-        let num_atoms = self.atoms.len();
-        let mut atom = atom;
-        atom.index = Some(num_atoms);
-        
-        if mark_root {
-            self.roots.push(num_atoms);
-        }
-
-        self.atoms.push(atom);
-        self.adj_list.push(Vec::new());
-        self.bond_counts.push(0.);
-        self.ring_bond_flags.push(false);
-
-        if self.atoms[num_atoms].is_aromatic {
-            self.delocal_subgraph.insert(num_atoms, Vec::new());
-        }
-
-        num_atoms
+    fn add_atom(&mut self, atom: &Atom) -> usize {
+        self.atoms.push(atom.clone());
+        self.adj_list.push(HashSet::new());
+        self.adj_list.len() - 1
     }
 
-    fn add_bond(mut self, src: usize, dst: usize, order: f64, stereo: String) {
-        if src >= dst {
-            panic!("Source must be less than destination.")
-        }
-
-        let bond = DirectedBond::new(src, dst, order, Some(stereo), false);
-        self.add_bond_at_loc(bond, None);
-        self.bond_counts[src] += order;
-        self.bond_counts[dst] += order;
-
-        if order == 1.5 {
-            // Insert vectors if the keys do not have entries.
-            self.delocal_subgraph.entry(src).or_insert(Vec::new());
-            self.delocal_subgraph.entry(dst).or_insert(Vec::new());
-            self.delocal_subgraph.get_mut(&src).unwrap().push(dst);
-            self.delocal_subgraph.get_mut(&dst).unwrap().push(src);
-        }
+    fn add_bond(&mut self, source: usize, destination: usize, order: f64, stereo_bond_char: Option<char>) {
+        let src_dst_bond = DirectedBond::new(source, destination, order, stereo_bond_char, false);
+        let dst_src_bond = DirectedBond::new(destination, source, order, stereo_bond_char, false);
+        self.bond_dict.insert((source, destination), src_dst_bond);
+        self.bond_dict.insert((destination, source), dst_src_bond);
+        self.adj_list[source].insert(destination);
+        self.adj_list[destination].insert(source);
     }
 
-    fn add_placeholder_bond(mut self, src: usize) -> usize {
-        let out_edges = &mut self.adj_list[src];
-        out_edges.push(None);
-        out_edges.len() - 1
-    }
-
-    fn add_ring_bond(
-        mut self,
-        a: usize,
-        b: usize,
-        order: f64,
-        a_stereo: Option<String>,
-        b_stereo: Option<String>,
-        maybe_a_pos: Option<usize>,
-        maybe_b_pos: Option<usize>,
-    ) {
-        let a_bond = DirectedBond::new(a, b, order, a_stereo, true);
-        let b_bond = DirectedBond::new(a, b, order, b_stereo, true);
-        self.add_bond_at_loc(a_bond, maybe_a_pos);
-        self.add_bond_at_loc(b_bond, maybe_b_pos);
-        self.bond_counts[a] += order;
-        self.bond_counts[b] += order;
-        self.ring_bond_flags[a] = true;
-        self.ring_bond_flags[b] = true;
-
-        if order == 1.5 {
-            self.delocal_subgraph.entry(a).or_insert(Vec::new());
-            self.delocal_subgraph.entry(b).or_insert(Vec::new());
-            self.delocal_subgraph.get_mut(&a).unwrap().push(b);
-            self.delocal_subgraph.get_mut(&b).unwrap().push(a);
-        }
-    }
-
-    fn update_bond_order(mut self, a: usize, b: usize, new_order: f64) {
-        if new_order < 1.0 || new_order > 3.0 {
-            panic!("new_order must be within [1.0, 3.0]");
-        }
-        
-        let mut a = a;
-        let mut b = b;
-        if a > b {
-            let tmp = a;
-            a = b;
-            b = tmp;
-        }
-        
-        let a_to_b = self.bond_dict.get(&(a, b)).unwrap();
-
-        if new_order == a_to_b.order {
-            return
-        }
-        
-        if a_to_b.ring_bond {
-            let b_to_a = self.bond_dict.get_mut(&(b, a)).unwrap();
-            b_to_a.order = new_order;
-        }
-
-        let a_to_b = self.bond_dict.get_mut(&(a, b)).unwrap();
-
-        let old_order = a_to_b.order;
-        a_to_b.order = new_order;
-        self.bond_counts[a] += new_order - old_order;
-        self.bond_counts[b] += new_order - old_order;
-    }
-
-    fn add_bond_at_loc(&mut self, bond: DirectedBond, maybe_pos: Option<usize>) {
-        let bond_src = bond.src;
-        self.bond_dict.insert((bond.src, bond.dst), bond.clone());
-
-        let out_edges = &mut self.adj_list[bond_src];
-        if (maybe_pos.is_none()) || (maybe_pos.unwrap() == out_edges.len()) {
-            out_edges.push(Some(bond));
-        } else if let Some(pos) = maybe_pos {
-            out_edges.insert(pos, Some(bond));
-        }
-    }
-
-    fn is_kekulized(&self) -> bool {
-        return !self.delocal_subgraph.is_empty();
-    }
-
-    /// Algorithm based on Depth-First article by Richard L. Apodaca
-    /// Reference:
-    /// https://depth-first.com/articles/2020/02/10/a-comprehensive-treatment-of-aromaticity-in-the-smiles-language/
-    fn kekulize(self) -> bool {
-        if self.is_kekulized() {
-            return true;
-        }
-
-        let kept_nodes: HashSet<usize> = self.delocal_subgraph.keys().filter(|node| !self.prune_from_ds(**node)).cloned().collect();
-
-        // relabel kept DS nodes to be 0, 1, 2, ...
-        let mut labels: Vec<usize> = kept_nodes.iter().cloned().collect();
-        labels.sort();
-        let node_to_label: HashMap<usize, usize> = labels.iter().enumerate().map(|(idx, label)| (label.clone(), idx)).collect::<HashMap<_, _>>();
-
-        // pruned and relabelled DS
-        let mut pruned_ds: Vec<Vec<usize>> = vec![Vec::new(); labels.len()];
-        for node in &kept_nodes {
-            let label = node_to_label[&node];
-            let adj_nodes: Vec<usize> = self.delocal_subgraph[&node].iter().filter(|v| kept_nodes.contains(v)).cloned().collect();
-            for adj in adj_nodes {
-                pruned_ds[label].push(node_to_label[&adj]);
-            }
-        }
-        return false;
-    }
-
-    fn prune_from_ds(&self, node: usize) -> bool {
-        if let Some(adj_nodes) = self.delocal_subgraph.get(&node) {
-            let atom = &self.atoms[node];
-            let valences = AROMATIC_VALENCES.get(&atom.element.as_str()).unwrap();
-            
-            // each bond in DS has order 1.5 - we treat them as single bonds
-            let mut used_electrons = (self.bond_counts[node] - 0.5 * (adj_nodes.len() as f64)) as i32;
-
-            let valence = last_valence(valences) - atom.charge;
-            used_electrons += atom.h_count;
-            
-            // count the total number of bound electrons of each atom
-            let bond_count_int = self.bond_counts[node] as i32;
-            let bound_electrons = atom.charge.max(0) + atom.h_count + bond_count_int + (2 * (bond_count_int % 1));
-            
-            // calculate the number of unpaired electrons of each atom
-            let radical_electrons = VALENCE_ELECTRONS[&atom.element.as_str()].max(0) - bound_electrons;
-            
-            // unpaired electrons do not contribute to the aromatic system
-            let free_electrons = valence - used_electrons - radical_electrons;
-
-            let used_electrons_any = match valences {
-                ValenceTuple::One(x) => used_electrons == x - atom.charge,
-                ValenceTuple::Two(x, y) => used_electrons == x - atom.charge || used_electrons == y - atom.charge,
-            };
-
-            if used_electrons_any {
-                return true;
-            } else {
-                return !((free_electrons >= 0) && (free_electrons % 2 != 0))
-            }
-        } else {
-            true
-        }
+    fn add_ring_bonds(&mut self, l_atom_idx: usize, r_atom_idx: usize, order: f64, l_atom_stereo: Option<char>, r_atom_stereo: Option<char>) {
+        let l_bond = DirectedBond::new(l_atom_idx, r_atom_idx, order, l_atom_stereo, true);
+        let r_bond = DirectedBond::new(r_atom_idx, l_atom_idx, order, r_atom_stereo, true);
+        self.bond_dict.insert((l_atom_idx, r_atom_idx), l_bond.clone());
+        self.bond_dict.insert((r_atom_idx, l_atom_idx), r_bond.clone());
+        self.adj_list[l_atom_idx].insert(r_atom_idx);
+        self.adj_list[r_atom_idx].insert(l_atom_idx);
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DirectedBond {
     src: usize,
     dst: usize,
     order: f64,
-    stereo: Option<String>,
+    stereo: Option<char>,
     ring_bond: bool,
 }
 
@@ -247,7 +87,7 @@ impl DirectedBond {
         src: usize,
         dst: usize,
         order: f64,
-        stereo: Option<String>,
+        stereo: Option<char>,
         ring_bond: bool,
     ) -> Self {
         DirectedBond {src, dst, order, stereo, ring_bond}
@@ -256,7 +96,6 @@ impl DirectedBond {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Atom {
-    pub index: Option<usize>,
     pub element: String,
     pub is_aromatic: bool,
     pub isotope: Option<i32>,
@@ -275,7 +114,6 @@ impl Atom {
         charge: i32,
     ) -> Self {
         Atom {
-            index: None,
             element: element,
             is_aromatic: is_aromatic,
             isotope: isotope,
@@ -287,18 +125,328 @@ impl Atom {
 }
 
 /// Reads a molecular graph from a SMILES string.
-pub fn create_mol_graph(attributable: bool, smiles: &str) -> Result<MolecularGraph, SMILESParserError> {
+pub fn create_mol_graph(smiles: &str) -> Result<MolecularGraph, SMILESParserError> {
     if smiles.is_empty() {
         return Err(SMILESParserError::new(smiles.to_string(), "Empty SMILES".to_string(), 0));
     }
-    let mut mol = MolecularGraph::new(attributable);
-    let mut tokens: Vec<SMILESToken> = SMILESTokenizer::new(smiles).into_iter().collect::<Result<_, _>>()?;
+    let mut mol = MolecularGraph::new(false);
+    let tokens = SMILESTokenizer::new(smiles).into_iter().collect::<Result<Vec<SMILESToken>, SMILESParserError>>()?;
+    let mut tokens_queue = VecDeque::from(tokens);
 
-    let q = VecDeque::from(tokens);
+    while !tokens_queue.is_empty() {
+        derive_mol_from_tokens(&mut mol, &mut tokens_queue, smiles)?;
+    }
 
     return Ok(mol)
 }
 
-fn derive_mol_from_tokens(mol: &mut MolecularGraph, smiles: &str, tokens: &mut Vec<SMILESToken>) {
-    
+fn derive_mol_from_tokens(
+    mol: &mut MolecularGraph,
+    tokens: &mut VecDeque<SMILESToken>,
+    smiles: &str,
+) -> Result<usize, SMILESParserError> {
+    let mut prev_stack = Vec::new();
+    let mut branch_stack = Vec::new();
+    let mut ring_log = HashMap::new();
+
+    while !tokens.is_empty() {
+        let token = tokens.pop_front().unwrap();
+        let maybe_prev_atom_idx = prev_stack.get(prev_stack.len().saturating_sub(1)).copied();
+
+        if token.token_type == SMILESTokenType::Dot {
+            break;
+        } else if token.token_type == SMILESTokenType::Atom {
+            let curr = match smiles_to_atom(&token.token) {
+                Some(atom) => atom,
+                None => {
+                    return Err(
+                        SMILESParserError::new(
+                            smiles.to_string(),
+                            format!("Invalid atom symbol {}", token.token),
+                            token.start_idx,
+                        )
+                    )
+                },
+            };
+            
+            // Add the atom to the graph.
+            let inserted_idx = mol.add_atom(&curr);
+            
+            // Add bonds to the graph if there's a previous atom.
+            if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+                let (order, stereo_bond_char) = smiles_to_bond(
+                    smiles,
+                    token.start_idx,
+                    token.bond_token,
+                    &curr,
+                    &mol.atoms[prev_atom_idx],
+                )?;
+                mol.add_bond(prev_atom_idx, inserted_idx, order, stereo_bond_char);
+            }
+
+            // Remove the previous atom index, and add the current inserted index as the previous index.
+            prev_stack.pop();
+            prev_stack.push(inserted_idx);
+        } else if token.token_type == SMILESTokenType::Branch {
+            if token.token == "(" {
+                if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+                    prev_stack.push(prev_atom_idx);
+                    branch_stack.push((token.token, token.start_idx));
+                } else {
+                    return Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "Branch has no previous atom.".to_string(),
+                        token.start_idx,
+                    ));
+                }
+            } else {
+                if branch_stack.is_empty() {
+                    return Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "Hanging ')' bracket".to_string(),
+                        token.start_idx,
+                    ));
+                }
+                branch_stack.pop();
+                prev_stack.pop();
+            }
+        } else if token.token_type == SMILESTokenType::Ring {
+            if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
+                // The ending ring bond token.
+                if let Some(ratom_idx) = prev_stack.pop() {
+                    // Validate whether a ring bond should be added.
+                    if mol.has_bond(latom_idx, ratom_idx) {
+                        return Err(SMILESParserError::new(
+                            smiles.to_string(),
+                            "Attempted to make a ring bond between already-bonded atoms.".to_string(),
+                            token.start_idx,
+                        ));
+                    }
+                    
+                    match (maybe_latom_bond_char, token.bond_token) {
+                        (Some(latom_bond_char), Some(ratom_bond_char)) => {
+                            if latom_bond_char != ratom_bond_char && 
+                            (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
+                                return Err(SMILESParserError::new(
+                                    smiles.to_string(),
+                                    "A ring bond is specified at both ends, but they do not match.".to_string(),
+                                    token.start_idx,
+                                ));
+                            }
+                        }
+                        _ => {},
+                    };
+                    
+                    // Attempt to include a ring bond.
+                    let latom = &mol.atoms[latom_idx];
+                    let ratom = &mol.atoms[ratom_idx];
+
+                    let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
+                    let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
+                    
+                    let order: f64;
+                    if latom.is_aromatic && ratom.is_aromatic && maybe_latom_bond_char.is_none() && token.bond_token.is_none() {
+                        order = 1.5;
+                    } else {
+                        order = l_order.max(r_order);
+                    }
+
+                    mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
+                } else {
+                    return Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "Ending ring token has no previous atom.".to_string(),
+                        token.start_idx,
+                    ));
+                }
+            } else {
+                // The starting ring bond token.
+                if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+                    ring_log.insert(token.token.clone(), (token.bond_token, prev_atom_idx));
+                } else {
+                    return Err(SMILESParserError::new(
+                        smiles.to_string(),
+                        "Starting ring token has no previous atom.".to_string(),
+                        token.start_idx,
+                    ));
+                }
+            }
+        }
+    }
+    return Ok(2);
+}
+
+fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>, curr_atom: &Atom, prev_atom: &Atom) -> Result<(f64, Option<char>), SMILESParserError> {
+    match maybe_bond_char {
+        Some(bond_char) => {
+            if let Some(bond_order) = SMILES_BOND_ORDERS.get(&bond_char) {
+                let stereo_bond_char = SMILES_STEREO_BONDS.get(&bond_char).copied();
+                return Ok((*bond_order, stereo_bond_char));
+            } else {
+                // All bond types must be defined in SMILES_BOND_ORDERS.
+                return Err(SMILESParserError::new(
+                    smiles.to_string(),
+                    format!("Unknown bond char: '{}'.", bond_char),
+                    token_idx,
+                ));
+            }
+        }
+        None => {
+            if curr_atom.is_aromatic && prev_atom.is_aromatic {
+                // The same bond order as a directly specified aromatic bond (':').
+                return Ok((1.5, None));
+            }
+            // Assumes single bond ('-') if not specified.
+            return Ok((1.0, None));
+        },
+    }
+}
+
+fn get_bond_order(smiles: &str, index: usize, bond_char: &char) -> Result<f64, SMILESParserError> {
+    if let Some(v) = SMILES_BOND_ORDERS.get(bond_char) {
+        return Ok(*v);
+    }
+    Err(SMILESParserError::new(
+        smiles.to_string(),
+        format!("Unknown bond character '{}'.", bond_char).to_string(),
+        index,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_string() {
+        let x = create_mol_graph("");
+        assert!(x.is_err());
+        assert_eq!(x.as_ref().unwrap_err().index, 0);
+        assert_eq!(x.as_ref().unwrap_err().message, "Empty SMILES");
+    }
+
+    #[test]
+    fn test_create_mol_graph_stereo() {
+        let x = create_mol_graph("F/C=C\\F");
+        assert!(x.is_ok());
+        let x = x.unwrap();
+
+        let expected_atoms = vec![
+            Atom::new("F".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("F".to_string(), false, None, None, 0, 0),
+        ];
+        let expected_adj_list = vec![
+            HashSet::from([1]),
+            HashSet::from([0, 2]),
+            HashSet::from([1, 3]),
+            HashSet::from([2]),
+        ];
+        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((0, 1), DirectedBond::new(0, 1, 1.0, Some('/'), false)),
+                ((1, 0), DirectedBond::new(1, 0, 1.0, Some('/'), false)),
+                ((1, 2), DirectedBond::new(1, 2, 2.0, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 2.0, None, false)),
+                ((2, 3), DirectedBond::new(2, 3, 1.0, Some('\\'), false)),
+                ((3, 2), DirectedBond::new(3, 2, 1.0, Some('\\'), false)),
+            ]
+        );
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert_eq!(x.bond_dict, expected_bond_dict);
+    }
+
+    #[test]
+    fn test_create_mol_graph_dot() {
+        let x = create_mol_graph("[Cu+2].[O-]S(=O)(=O)[O-]");
+        assert!(x.is_ok());
+        let x = x.unwrap();
+
+        let expected_atoms = vec![
+            Atom::new("Cu".to_string(), false, None, None, 0, 2),
+            Atom::new("O".to_string(), false, None, None, 0, -1),
+            Atom::new("S".to_string(), false, None, None, 0, 0),
+            Atom::new("O".to_string(), false, None, None, 0, 0),
+            Atom::new("O".to_string(), false, None, None, 0, 0),
+            Atom::new("O".to_string(), false, None, None, 0, -1),
+        ];
+        let expected_adj_list = vec![
+            HashSet::new(),  // Cu+2 has no bonds with any other atom.
+            HashSet::from([2]),
+            HashSet::from([1, 3, 4, 5]),
+            HashSet::from([2]),
+            HashSet::from([2]),
+            HashSet::from([2]),
+        ];
+        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((1, 2), DirectedBond::new(1, 2, 1.0, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 1.0, None, false)),
+                ((2, 3), DirectedBond::new(2, 3, 2.0, None, false)),
+                ((3, 2), DirectedBond::new(3, 2, 2.0, None, false)),
+                ((2, 4), DirectedBond::new(2, 4, 2.0, None, false)),
+                ((4, 2), DirectedBond::new(4, 2, 2.0, None, false)),
+                ((2, 5), DirectedBond::new(2, 5, 1.0, None, false)),
+                ((5, 2), DirectedBond::new(5, 2, 1.0, None, false)),
+            ]
+        );
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert_eq!(x.bond_dict, expected_bond_dict);
+    }
+
+    #[test]
+    fn test_create_mol_graph_ring_bond() {
+        let x = create_mol_graph("O1C(CCl)=CCN=1");
+        assert!(x.is_ok());
+        let x = x.unwrap();
+
+        let expected_atoms = vec![
+            Atom::new("O".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("Cl".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("C".to_string(), false, None, None, 0, 0),
+            Atom::new("N".to_string(), false, None, None, 0, 0),
+        ];
+        let expected_adj_list = vec![
+            HashSet::from([1, 6]),
+            HashSet::from([0, 2, 4]),
+            HashSet::from([1, 3]),
+            HashSet::from([2]),
+            HashSet::from([1, 5]),
+            HashSet::from([4, 6]),
+            HashSet::from([5, 0]),
+        ];
+        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((0, 1), DirectedBond::new(0, 1, 1.0, None, false)),
+                ((1, 0), DirectedBond::new(1, 0, 1.0, None, false)),
+
+                ((1, 2), DirectedBond::new(1, 2, 1.0, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 1.0, None, false)),
+
+                ((2, 3), DirectedBond::new(2, 3, 1.0, None, false)),
+                ((3, 2), DirectedBond::new(3, 2, 1.0, None, false)),
+
+                ((4, 1), DirectedBond::new(4, 1, 2.0, None, false)),
+                ((1, 4), DirectedBond::new(1, 4, 2.0, None, false)),
+
+                ((4, 5), DirectedBond::new(4, 5, 1.0, None, false)),
+                ((5, 4), DirectedBond::new(5, 4, 1.0, None, false)),
+
+                ((5, 6), DirectedBond::new(5, 6, 1.0, None, false)),
+                ((6, 5), DirectedBond::new(6, 5, 1.0, None, false)),
+
+                ((6, 0), DirectedBond::new(6, 0, 2.0, None, true)),
+                ((0, 6), DirectedBond::new(0, 6, 2.0, None, true)),
+            ]
+        );
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert_eq!(x.bond_dict, expected_bond_dict);
+    }
 }

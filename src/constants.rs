@@ -63,3 +63,18 @@ pub static VALENCE_ELECTRONS: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| Ha
 pub static AROMATIC_SUBSET: Lazy<HashSet<&'static str>> = Lazy::new(|| HashSet::from(
     ["b", "al", "c", "si", "n", "p", "as", "o", "s", "se", "te"]
 ));
+
+pub static SMILES_BOND_ORDERS: Lazy<HashMap<char, f64>> = Lazy::new(|| HashMap::from(
+    [
+        ('-', 1.0),
+        ('/', 1.0),
+        ('\\', 1.0),
+        (':', 1.5),
+        ('=', 2.0),
+        ('#', 3.0),
+    ]
+));
+
+pub static SMILES_STEREO_BONDS: Lazy<HashSet<char>> = Lazy::new(|| HashSet::from(
+    ['/', '\\']
+));

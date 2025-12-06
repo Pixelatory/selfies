@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::mol_graph::{Atom, MolecularGraph};
-use crate::constants::{AROMATIC_SUBSET, ORGANIC_SUBSET, ELEMENTS};
+use crate::constants::{AROMATIC_SUBSET, ELEMENTS, ORGANIC_SUBSET, SMILES_BOND_ORDERS};
 use crate::utilities::{capitalize_first};
 
 static SMILES_BRACKETED_ATOM_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(
@@ -46,6 +46,24 @@ impl fmt::Display for SMILESToken {
     }
 }
 
+impl SMILESToken {
+    pub fn new(
+        bond_token: Option<char>,
+        start_idx: usize,
+        end_idx: usize,
+        token_type: SMILESTokenType,
+        token: String,
+    ) -> Self {
+        Self {
+            bond_token,
+            start_idx,
+            end_idx,
+            token_type,
+            token,
+        }
+    }
+}
+
 // ---------- Error Handling ----------
 
 #[derive(Debug)]
@@ -76,10 +94,6 @@ impl fmt::Display for SMILESParserError {
 }
 
 impl std::error::Error for SMILESParserError {}
-
-// ---------- Constants ----------
-
-const SMILES_BOND_ORDERS: &[char] = &['-', '=', '#', ':', '/', '\\'];
 
 // ---------- Tokenizer Iterator ----------
 
@@ -124,7 +138,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             }
 
             // BOND.
-            let (bond_token, bond_idx) = if SMILES_BOND_ORDERS.contains(&ch) {
+            let (bond_token, bond_idx) = if SMILES_BOND_ORDERS.contains_key(&ch) {
                 i += 1;
                 (Some(ch), i-1)
             } else {
@@ -258,7 +272,7 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
 
 
 /// Reads an atom from its SMILES representation.
-fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
+pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     let chars: Vec<char> = atom_symbol.chars().collect();
 
     if ORGANIC_SUBSET.contains(atom_symbol) {
@@ -419,6 +433,21 @@ mod tests {
                 SMILESToken{bond_token: None, start_idx: 30, end_idx: 31, token_type: SMILESTokenType::Atom, token: String::from("C") },
                 SMILESToken{bond_token: None, start_idx: 31, end_idx: 32, token_type: SMILESTokenType::Atom, token: String::from("C") },
                 SMILESToken{bond_token: None, start_idx: 32, end_idx: 35, token_type: SMILESTokenType::Ring, token: String::from("%10") },
+            ]
+        );
+        assert_eq!(tokens, expected_tokens);
+    }
+
+    #[test]
+    fn test_smiles_tokenizer_2() {
+        let x = SMILESTokenizer::new("F/C=C/F");
+        let tokens: Vec<SMILESToken> = x.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+        let expected_tokens = Vec::from(
+            [
+                SMILESToken::new(None, 0, 1, SMILESTokenType::Atom, "F".to_string()),
+                SMILESToken::new(Some('/'), 2, 3, SMILESTokenType::Atom, "C".to_string()),
+                SMILESToken::new(Some('='), 4, 5, SMILESTokenType::Atom, "C".to_string()),
+                SMILESToken::new(Some('/'), 6, 7, SMILESTokenType::Atom, "F".to_string()),
             ]
         );
         assert_eq!(tokens, expected_tokens);
