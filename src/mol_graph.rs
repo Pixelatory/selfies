@@ -2,17 +2,31 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::last_valence};
 
+struct MolecularGraphContext {
+    mol_graph: MolecularGraph,
+    attribution: Option<Attribution>,
+    delocalized_subgraph: Subgraph,
+}
+
+struct Subgraph {
+    included_nodes: HashSet<usize>,
+    included_edges: HashSet<(usize, usize)>,
+}
+
+struct AttributeReason {
+    // TODO: fill me out!
+}
 
 struct Attribution {
-    /// Token index.
-    index: usize,
-    /// Token string.
-    token: String,
+    // e.g. attribute reason for each edge
+    edge_attributes: HashMap<(usize, usize), AttributeReason>
 }
 
 impl Attribution {
-    pub fn new(index: usize, token: String) -> Self {
-        Self {index, token}
+    pub fn new() -> Self {
+        Self {
+            edge_attributes: HashMap::new()
+        }
     }
 }
 
@@ -140,12 +154,50 @@ pub fn create_mol_graph(smiles: &str) -> Result<MolecularGraph, SMILESParserErro
     return Ok(mol)
 }
 
+fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph, maybe_prev_atom_idx: Option<usize>, prev_stack: &mut Vec<usize>) -> Result<(), SMILESParserError>{
+    let curr = match smiles_to_atom(&token.token) {
+        Some(atom) => atom,
+        None => {
+            return Err(
+                SMILESParserError::new(
+                    smiles.to_string(),
+                    format!("Invalid atom symbol {}", token.token),
+                    token.start_idx,
+                )
+            )
+        },
+    };
+    
+    // Add the atom to the graph.
+    let inserted_idx = mol.add_atom(&curr);
+    
+    // Add bonds to the graph if there's a previous atom.
+    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+        let (order, stereo_bond_char) = smiles_to_bond(
+            smiles,
+            token.start_idx,
+            token.bond_token,
+            &curr,
+            &mol.atoms[prev_atom_idx],
+        )?;
+        mol.add_bond(prev_atom_idx, inserted_idx, order, stereo_bond_char);
+    }
+
+    // Remove the previous atom index, and add the current inserted index as the previous index.
+    prev_stack.pop();
+    prev_stack.push(inserted_idx);
+
+    Ok(())
+}
+
 fn derive_mol_from_tokens(
     mol: &mut MolecularGraph,
     tokens: &mut VecDeque<SMILESToken>,
     smiles: &str,
 ) -> Result<usize, SMILESParserError> {
+    // Holds indexes of previous atoms in the graph.
     let mut prev_stack = Vec::new();
+    // Holds (branch token char, branch token index).
     let mut branch_stack = Vec::new();
     let mut ring_log = HashMap::new();
 
@@ -153,122 +205,95 @@ fn derive_mol_from_tokens(
         let token = tokens.pop_front().unwrap();
         let maybe_prev_atom_idx = prev_stack.get(prev_stack.len().saturating_sub(1)).copied();
 
-        if token.token_type == SMILESTokenType::Dot {
-            break;
-        } else if token.token_type == SMILESTokenType::Atom {
-            let curr = match smiles_to_atom(&token.token) {
-                Some(atom) => atom,
-                None => {
-                    return Err(
-                        SMILESParserError::new(
-                            smiles.to_string(),
-                            format!("Invalid atom symbol {}", token.token),
-                            token.start_idx,
-                        )
-                    )
-                },
-            };
-            
-            // Add the atom to the graph.
-            let inserted_idx = mol.add_atom(&curr);
-            
-            // Add bonds to the graph if there's a previous atom.
-            if let Some(prev_atom_idx) = maybe_prev_atom_idx {
-                let (order, stereo_bond_char) = smiles_to_bond(
-                    smiles,
-                    token.start_idx,
-                    token.bond_token,
-                    &curr,
-                    &mol.atoms[prev_atom_idx],
-                )?;
-                mol.add_bond(prev_atom_idx, inserted_idx, order, stereo_bond_char);
-            }
-
-            // Remove the previous atom index, and add the current inserted index as the previous index.
-            prev_stack.pop();
-            prev_stack.push(inserted_idx);
-        } else if token.token_type == SMILESTokenType::Branch {
-            if token.token == "(" {
-                if let Some(prev_atom_idx) = maybe_prev_atom_idx {
-                    prev_stack.push(prev_atom_idx);
-                    branch_stack.push((token.token, token.start_idx));
-                } else {
-                    return Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "Branch has no previous atom.".to_string(),
-                        token.start_idx,
-                    ));
-                }
-            } else {
-                if branch_stack.is_empty() {
-                    return Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "Hanging ')' bracket".to_string(),
-                        token.start_idx,
-                    ));
-                }
-                branch_stack.pop();
-                prev_stack.pop();
-            }
-        } else if token.token_type == SMILESTokenType::Ring {
-            if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
-                // The ending ring bond token.
-                if let Some(ratom_idx) = prev_stack.pop() {
-                    // Validate whether a ring bond should be added.
-                    if mol.has_bond(latom_idx, ratom_idx) {
+        match token.token_type {
+            SMILESTokenType::Dot => {
+                break;
+            },
+            SMILESTokenType::Atom => handle_atom_token(&token, smiles, mol, maybe_prev_atom_idx, &mut prev_stack)?,
+            SMILESTokenType::Branch => {
+                if token.token == "(" {
+                    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+                        prev_stack.push(prev_atom_idx);
+                        branch_stack.push((token.token, token.start_idx));
+                    } else {
                         return Err(SMILESParserError::new(
                             smiles.to_string(),
-                            "Attempted to make a ring bond between already-bonded atoms.".to_string(),
+                            "Branch has no previous atom.".to_string(),
                             token.start_idx,
                         ));
                     }
-                    
-                    match (maybe_latom_bond_char, token.bond_token) {
-                        (Some(latom_bond_char), Some(ratom_bond_char)) => {
-                            if latom_bond_char != ratom_bond_char && 
-                            (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
-                                return Err(SMILESParserError::new(
-                                    smiles.to_string(),
-                                    "A ring bond is specified at both ends, but they do not match.".to_string(),
-                                    token.start_idx,
-                                ));
-                            }
-                        }
-                        _ => {},
-                    };
-                    
-                    // Attempt to include a ring bond.
-                    let latom = &mol.atoms[latom_idx];
-                    let ratom = &mol.atoms[ratom_idx];
-
-                    let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
-                    let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
-                    
-                    let order: f64;
-                    if latom.is_aromatic && ratom.is_aromatic && maybe_latom_bond_char.is_none() && token.bond_token.is_none() {
-                        order = 1.5;
-                    } else {
-                        order = l_order.max(r_order);
+                } else {
+                    if branch_stack.is_empty() {
+                        return Err(SMILESParserError::new(
+                            smiles.to_string(),
+                            "Hanging ')' bracket".to_string(),
+                            token.start_idx,
+                        ));
                     }
-
-                    mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
-                } else {
-                    return Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "Ending ring token has no previous atom.".to_string(),
-                        token.start_idx,
-                    ));
+                    branch_stack.pop();
+                    prev_stack.pop();
                 }
-            } else {
-                // The starting ring bond token.
-                if let Some(prev_atom_idx) = maybe_prev_atom_idx {
-                    ring_log.insert(token.token.clone(), (token.bond_token, prev_atom_idx));
+            },
+            SMILESTokenType::Ring => {
+                if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
+                    // The ending ring bond token.
+                    if let Some(ratom_idx) = prev_stack.pop() {
+                        // Validate whether a ring bond should be added.
+                        if mol.has_bond(latom_idx, ratom_idx) {
+                            return Err(SMILESParserError::new(
+                                smiles.to_string(),
+                                "Attempted to make a ring bond between already-bonded atoms.".to_string(),
+                                token.start_idx,
+                            ));
+                        }
+                        
+                        match (maybe_latom_bond_char, token.bond_token) {
+                            (Some(latom_bond_char), Some(ratom_bond_char)) => {
+                                if latom_bond_char != ratom_bond_char && 
+                                (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
+                                    return Err(SMILESParserError::new(
+                                        smiles.to_string(),
+                                        "A ring bond is specified at both ends, but they do not match.".to_string(),
+                                        token.start_idx,
+                                    ));
+                                }
+                            }
+                            _ => {},
+                        };
+                        
+                        // Attempt to include a ring bond.
+                        let latom = &mol.atoms[latom_idx];
+                        let ratom = &mol.atoms[ratom_idx];
+
+                        let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
+                        let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
+                        
+                        let order: f64;
+                        if latom.is_aromatic && ratom.is_aromatic && maybe_latom_bond_char.is_none() && token.bond_token.is_none() {
+                            order = 1.5;
+                        } else {
+                            order = l_order.max(r_order);
+                        }
+
+                        mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
+                    } else {
+                        return Err(SMILESParserError::new(
+                            smiles.to_string(),
+                            "Ending ring token has no previous atom.".to_string(),
+                            token.start_idx,
+                        ));
+                    }
                 } else {
-                    return Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "Starting ring token has no previous atom.".to_string(),
-                        token.start_idx,
-                    ));
+                    // The starting ring bond token.
+                    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+                        ring_log.insert(token.token.clone(), (token.bond_token, prev_atom_idx));
+                    } else {
+                        return Err(SMILESParserError::new(
+                            smiles.to_string(),
+                            "Starting ring token has no previous atom.".to_string(),
+                            token.start_idx,
+                        ));
+                    }
                 }
             }
         }
