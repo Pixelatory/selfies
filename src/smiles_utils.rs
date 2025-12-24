@@ -3,7 +3,7 @@ use std::{fmt, str::Chars};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::mol_graph::{Atom, MolecularGraph};
+use crate::mol_graph::Atom;
 use crate::constants::{AROMATIC_SUBSET, ELEMENTS, ORGANIC_SUBSET, SMILES_BOND_ORDERS};
 use crate::utilities::{capitalize_first};
 
@@ -276,9 +276,9 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     let chars: Vec<char> = atom_symbol.chars().collect();
 
     if ORGANIC_SUBSET.contains(atom_symbol) {
-        return Some(Atom::new(atom_symbol.to_string(),  false, None, None, 0, 0));
+        return Some(Atom::new(atom_symbol.to_string(),  false, None, None, None, 0));
     } else if AROMATIC_SUBSET.contains(atom_symbol) {
-        return Some(Atom::new(atom_symbol.to_string(), true, None, None, 0, 0));
+        return Some(Atom::new(atom_symbol.to_string(), true, None, None, None, 0));
     } else if !(*chars.first()? == '[' && *chars.last()? == ']') {
         return None;
     }
@@ -311,7 +311,7 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     
 
     let isotope = match isotope_str.is_empty() {
-        false => Some(isotope_str.parse::<i32>().ok()?),
+        false => Some(isotope_str.parse::<u32>().ok()?),
         true => None,
     };
     let is_aromatic = element_match.chars().all(|c| c.is_ascii_lowercase())
@@ -330,11 +330,11 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
         false => {
             let h_count_suffix = h_count_match.strip_prefix("H")?;
             match h_count_suffix.is_empty() {
-                false => h_count_suffix.parse::<i32>().ok()?,
-                true => 1,
+                false => Some(h_count_suffix.parse::<u32>().ok()?),
+                true => Some(1),
             }
         },
-        true => 0,
+        true => Some(0),
     };
 
     let charge = match charge_match.is_empty() {
@@ -374,7 +374,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom::new(String::from("O"), false, None, None, 3, 1)
+            Atom::new(String::from("O"), false, None, None, Some(3), 1)
         );
         
         // Charge counts the many negative symbols.
@@ -382,7 +382,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom::new(String::from("Co"), false, None, None, 0, -3)
+            Atom::new(String::from("Co"), false, None, None, Some(0), -3)
         );
 
         // Isotope and is_aromatic are filled out.
@@ -390,7 +390,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom::new(String::from("C"), true, Some(14), None, 1, 0)
+            Atom::new(String::from("C"), true, Some(14), None, Some(1), 0)
         );
 
         // Chirality is filled out.
@@ -398,7 +398,7 @@ mod tests {
         assert!(x.is_some());
         assert_eq!(
             x.unwrap(),
-            Atom::new(String::from("C"), false, None, Some(String::from("@@")), 1, 0)
+            Atom::new(String::from("C"), false, None, Some(String::from("@@")), Some(1), 0)
         );
 
         // Unknown element.

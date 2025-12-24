@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::last_valence};
+use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
 
 struct MolecularGraphContext {
     mol_graph: MolecularGraph,
@@ -8,9 +8,19 @@ struct MolecularGraphContext {
     delocalized_subgraph: Subgraph,
 }
 
+/// The delocalized subgraph.
 struct Subgraph {
     included_nodes: HashSet<usize>,
     included_edges: HashSet<(usize, usize)>,
+}
+
+impl Subgraph {
+    pub fn new() -> Self {
+        Self {
+            included_nodes: HashSet::new(),
+            included_edges: HashSet::new(),
+        }
+    }
 }
 
 struct AttributeReason {
@@ -41,7 +51,7 @@ pub struct MolecularGraph {
     /// Stores atoms in this graph.
     atoms: Vec<Atom>,
     /// Stores all bonds in this graph.
-    bond_dict: HashMap<(usize, usize), DirectedBond>,
+    bond_map: HashMap<(usize, usize), DirectedBond>,
     /// Adjacency list, representing this graph. Stores indices of atoms.
     adj_list: Vec<HashSet<usize>>,
 }
@@ -50,13 +60,13 @@ impl MolecularGraph{
     fn new(attributable: bool) -> Self {
         Self {
             atoms: Vec::new(),
-            bond_dict: HashMap::new(),
+            bond_map: HashMap::new(),
             adj_list: Vec::new(),
         }
     }
 
     fn has_bond(&self, source: usize, destination: usize) -> bool {
-        self.bond_dict.contains_key(&(source, destination))
+        self.bond_map.contains_key(&(source, destination))
     }
 
     /// Adds an atom to the molecular graph.
@@ -71,8 +81,8 @@ impl MolecularGraph{
     fn add_bond(&mut self, source: usize, destination: usize, order: f64, stereo_bond_char: Option<char>) {
         let src_dst_bond = DirectedBond::new(source, destination, order, stereo_bond_char, false);
         let dst_src_bond = DirectedBond::new(destination, source, order, stereo_bond_char, false);
-        self.bond_dict.insert((source, destination), src_dst_bond);
-        self.bond_dict.insert((destination, source), dst_src_bond);
+        self.bond_map.insert((source, destination), src_dst_bond);
+        self.bond_map.insert((destination, source), dst_src_bond);
         self.adj_list[source].insert(destination);
         self.adj_list[destination].insert(source);
     }
@@ -80,8 +90,8 @@ impl MolecularGraph{
     fn add_ring_bonds(&mut self, l_atom_idx: usize, r_atom_idx: usize, order: f64, l_atom_stereo: Option<char>, r_atom_stereo: Option<char>) {
         let l_bond = DirectedBond::new(l_atom_idx, r_atom_idx, order, l_atom_stereo, true);
         let r_bond = DirectedBond::new(r_atom_idx, l_atom_idx, order, r_atom_stereo, true);
-        self.bond_dict.insert((l_atom_idx, r_atom_idx), l_bond.clone());
-        self.bond_dict.insert((r_atom_idx, l_atom_idx), r_bond.clone());
+        self.bond_map.insert((l_atom_idx, r_atom_idx), l_bond.clone());
+        self.bond_map.insert((r_atom_idx, l_atom_idx), r_bond.clone());
         self.adj_list[l_atom_idx].insert(r_atom_idx);
         self.adj_list[r_atom_idx].insert(l_atom_idx);
     }
@@ -112,9 +122,9 @@ impl DirectedBond {
 pub struct Atom {
     pub element: String,
     pub is_aromatic: bool,
-    pub isotope: Option<i32>,
+    pub isotope: Option<u32>,
     pub chirality: Option<String>,
-    pub h_count: i32,
+    pub h_count: Option<u32>,
     pub charge: i32,
 }
 
@@ -122,9 +132,9 @@ impl Atom {
     pub fn new(
         element: String,
         is_aromatic: bool,
-        isotope: Option<i32>,
+        isotope: Option<u32>,
         chirality: Option<String>,
-        h_count: i32,
+        h_count: Option<u32>,
         charge: i32,
     ) -> Self {
         Atom {
@@ -151,7 +161,80 @@ pub fn create_mol_graph(smiles: &str) -> Result<MolecularGraph, SMILESParserErro
         derive_mol_from_tokens(&mut mol, &mut tokens_queue, smiles)?;
     }
 
+    let subgraph = create_delocalized_subgraph(&mol);
+
     return Ok(mol)
+}
+
+/// Creates a delocalized subgraph from a constructed MolecularGraph.
+fn create_delocalized_subgraph(mol: &MolecularGraph) -> Subgraph {
+    let mut subgraph = Subgraph::new();
+    let mut should_prune_map: HashMap<usize, bool> = HashMap::new();
+
+    for bond in mol.bond_map.values() {
+        if bond.order == 1.5 {
+            let should_prune_src = memoize_should_prune(&mut should_prune_map, mol, bond.src);
+            let should_prune_dst = memoize_should_prune(&mut should_prune_map, mol, bond.dst);
+            if should_prune_src || should_prune_dst {
+                continue;
+            }
+            subgraph.included_edges.insert((bond.src, bond.dst));
+            subgraph.included_nodes.insert(bond.src);
+            subgraph.included_nodes.insert(bond.dst);
+        }
+    }
+    subgraph
+}
+
+/// Memoizes the output of should_prune().
+/// 
+/// Memoized outputs are stured in `should_prune_map`.
+fn memoize_should_prune(should_prune_map: &mut HashMap<usize, bool>, mol: &MolecularGraph, node: usize) -> bool {
+    match should_prune_map.get(&node) {
+        Some(result) => return *result,
+        None => {
+            let result = should_prune(mol, node);
+            should_prune_map.insert(node, result);
+            return result;
+        }
+    }
+}
+
+/// Whether the node (atom index in MolecularGraph) should be pruned from the delocalized subgraph.
+fn should_prune(mol: &MolecularGraph, node: usize) -> bool {
+    let adj_nodes = &mol.adj_list[node];
+    if adj_nodes.is_empty() {
+        return true;
+    }
+
+    let atom = &mol.atoms[node];
+    let valences = &AROMATIC_VALENCES[&atom.element.as_str()];
+
+    // Each bond in delocalized subgraph has order 1.5 - treat them as single bonds.
+    let mut used_electrons = adj_nodes.len() as i32;
+
+    // Account for implicit Hs.
+    return match atom.h_count {
+        None => {
+            assert!(atom.charge == 0);
+            valence_any(&valences, used_electrons)
+        },
+        Some(h_count) => {
+            let bond_count = adj_nodes.iter().map(|x| mol.bond_map[&(node, *x)].order).sum::<f64>() as i32;
+            let valence = last_valence(&valences) - atom.charge;
+            used_electrons += h_count as i32;
+
+            let bound_electrons = atom.charge.max(0) + h_count as i32 + bond_count;
+            let radical_electrons = (VALENCE_ELECTRONS[&atom.element.as_str()] - bound_electrons).max(0) % 2;
+            let free_electrons = valence - used_electrons - radical_electrons;
+
+            if valence_any(valences, used_electrons + atom.charge) {
+                return true;
+            } else {
+                return !((free_electrons >= 0) && (free_electrons % 2 != 0));
+            }
+        }
+    };
 }
 
 fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph, maybe_prev_atom_idx: Option<usize>, prev_stack: &mut Vec<usize>) -> Result<(), SMILESParserError>{
@@ -357,10 +440,10 @@ mod tests {
         let x = x.unwrap();
 
         let expected_atoms = vec![
-            Atom::new("F".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("F".to_string(), false, None, None, 0, 0),
+            Atom::new("F".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("F".to_string(), false, None, None, None, 0),
         ];
         let expected_adj_list = vec![
             HashSet::from([1]),
@@ -368,7 +451,7 @@ mod tests {
             HashSet::from([1, 3]),
             HashSet::from([2]),
         ];
-        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
             [
                 ((0, 1), DirectedBond::new(0, 1, 1.0, Some('/'), false)),
                 ((1, 0), DirectedBond::new(1, 0, 1.0, Some('/'), false)),
@@ -380,7 +463,7 @@ mod tests {
         );
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
-        assert_eq!(x.bond_dict, expected_bond_dict);
+        assert_eq!(x.bond_map, expected_bond_map);
     }
 
     #[test]
@@ -390,12 +473,12 @@ mod tests {
         let x = x.unwrap();
 
         let expected_atoms = vec![
-            Atom::new("Cu".to_string(), false, None, None, 0, 2),
-            Atom::new("O".to_string(), false, None, None, 0, -1),
-            Atom::new("S".to_string(), false, None, None, 0, 0),
-            Atom::new("O".to_string(), false, None, None, 0, 0),
-            Atom::new("O".to_string(), false, None, None, 0, 0),
-            Atom::new("O".to_string(), false, None, None, 0, -1),
+            Atom::new("Cu".to_string(), false, None, None, None, 2),
+            Atom::new("O".to_string(), false, None, None, None, -1),
+            Atom::new("S".to_string(), false, None, None, None, 0),
+            Atom::new("O".to_string(), false, None, None, None, 0),
+            Atom::new("O".to_string(), false, None, None, None, 0),
+            Atom::new("O".to_string(), false, None, None, None, -1),
         ];
         let expected_adj_list = vec![
             HashSet::new(),  // Cu+2 has no bonds with any other atom.
@@ -405,7 +488,7 @@ mod tests {
             HashSet::from([2]),
             HashSet::from([2]),
         ];
-        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
             [
                 ((1, 2), DirectedBond::new(1, 2, 1.0, None, false)),
                 ((2, 1), DirectedBond::new(2, 1, 1.0, None, false)),
@@ -419,7 +502,7 @@ mod tests {
         );
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
-        assert_eq!(x.bond_dict, expected_bond_dict);
+        assert_eq!(x.bond_map, expected_bond_map);
     }
 
     #[test]
@@ -429,13 +512,13 @@ mod tests {
         let x = x.unwrap();
 
         let expected_atoms = vec![
-            Atom::new("O".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("Cl".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("C".to_string(), false, None, None, 0, 0),
-            Atom::new("N".to_string(), false, None, None, 0, 0),
+            Atom::new("O".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("Cl".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("N".to_string(), false, None, None, None, 0),
         ];
         let expected_adj_list = vec![
             HashSet::from([1, 6]),
@@ -446,7 +529,7 @@ mod tests {
             HashSet::from([4, 6]),
             HashSet::from([5, 0]),
         ];
-        let expected_bond_dict: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
             [
                 ((0, 1), DirectedBond::new(0, 1, 1.0, None, false)),
                 ((1, 0), DirectedBond::new(1, 0, 1.0, None, false)),
@@ -472,6 +555,6 @@ mod tests {
         );
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
-        assert_eq!(x.bond_dict, expected_bond_dict);
+        assert_eq!(x.bond_map, expected_bond_map);
     }
 }

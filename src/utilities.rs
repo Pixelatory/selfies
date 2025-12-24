@@ -15,3 +15,10 @@ pub fn last_valence(valence_tuple: &ValenceTuple) -> i32 {
         ValenceTuple::Two(_, y) => *y,
     }
 }
+
+pub fn valence_any(valence_tuple: &ValenceTuple, check: i32) -> bool {
+    return match valence_tuple {
+        ValenceTuple::One(x) => *x == check,
+        ValenceTuple::Two(x, y) => *x == check || *y == check,
+    }
+}
