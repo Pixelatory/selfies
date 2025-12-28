@@ -10,7 +10,7 @@ use log::warn;
 /// Returns a hashmap representing a perfect matching, where the key is the
 /// graph node, and the value is the matching node. Returns None, if the graph
 /// cannot be perfectly matched.
-pub fn find_perfect_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, usize>> {
+pub fn find_perfect_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashMap<usize, usize>> {
     let mut matching = greedy_matching(graph)?;
 
     let mut unmatched: HashSet<usize> = (0..graph.len()).into_iter()
@@ -24,8 +24,8 @@ pub fn find_perfect_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, u
         let path = find_augmenting_path(graph, root, &matching)?;
 
         flip_augmenting_path(&mut matching, &path);
-        unmatched.remove(path.get(0)?);
-        unmatched.remove(path.get(path.len() - 1)?);
+        unmatched.remove(path.first()?);
+        unmatched.remove(path.last()?);
     }
 
     if matching.len() != graph.len() {
@@ -43,32 +43,29 @@ pub fn find_perfect_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, u
 /// Picks the node with the least unmatched neighbours, and then matches
 /// with the first unmatched neighbour. Repeats this process until no more
 /// matchings can be made.
-fn greedy_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, usize>> {
-
-    //let mut matching: Vec<Option<usize>> = vec![None; graph.len()];
-    let mut matching: HashMap<usize, usize> = HashMap::new();
-    // free_degrees[i] = number of unmatched neighbors for node i
-    let mut free_degrees: Vec<usize> = graph.iter().map(|x| x.len()).collect();
+fn greedy_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashMap<usize, usize>> {
+    let mut matching = HashMap::new();
+    // free_degrees[i] = number of unmatched neighbors for node i.
+    let mut free_degrees: HashMap<usize, usize> = graph.iter().map(|(node, adj_nodes)| (*node, adj_nodes.len())).collect();
 
     // Prioritize nodes with fewer unmatched neighbours.
     let node_pqueue: Vec<Reverse<(usize, usize)>> = free_degrees.iter()
-        .enumerate()
-        .map(|(index, free_degree)| Reverse((*free_degree, index)))
+        .map(|(index, free_degree)| Reverse((*free_degree, *index)))
         .collect();
     let mut heap = BinaryHeap::from(node_pqueue);
 
     while !heap.is_empty() {
         let (_, node) = heap.pop()?.0;
 
-        if matching.contains_key(&node) || *free_degrees.get(node)? == 0 {
+        if matching.contains_key(&node) || *free_degrees.get(&node)? == 0 {
             // Node cannot be matched.
             continue;
         }
         
         // Match node with first unmatched neighbour.
-        let mate = graph.get(node)?
+        let mate = graph.get(&node)?
             .iter()
-            .find(|x| !matching.contains_key(x))
+            .find(|x| !matching.contains_key(*x))
             .cloned()?;
         matching.insert(node, mate);
         matching.insert(mate, node);
@@ -76,11 +73,10 @@ fn greedy_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, usize>> {
         // Update the number of free degrees for neighbouring nodes.
         // Add them to the heap if they are not matched yet and have
         // candidate edges for matching.
-        for adj in graph[node].iter().chain(graph[mate].iter()) {
-            let adj = *adj;
-            free_degrees[adj] = free_degrees[adj].saturating_sub(1);
-            if !matching.contains_key(&adj) && *free_degrees.get(adj)? > 0 {
-                heap.push(Reverse((free_degrees[adj], adj)))
+        for adj in graph.get(&node)?.iter().chain(graph.get(&mate)?.iter()) {
+            free_degrees.insert(*adj, free_degrees.get(adj)?.saturating_sub(1));
+            if !matching.contains_key(adj) && *free_degrees.get(adj)? > 0 {
+                heap.push(Reverse((free_degrees[adj], *adj)))
             }
         }
     }
@@ -96,7 +92,7 @@ fn greedy_matching(graph: &Vec<Vec<usize>>) -> Option<HashMap<usize, usize>> {
 /// traversing through a matched edge and an unmatched edge.
 /// 
 /// Returns the vertex path, or None if there is no augmenting path.
-fn find_augmenting_path(graph: &Vec<Vec<usize>>, root: usize, matching: &HashMap<usize, usize>) -> Option<Vec<usize>> {
+fn find_augmenting_path(graph: &HashMap<usize, Vec<usize>>, root: usize, matching: &HashMap<usize, usize>) -> Option<Vec<usize>> {
     if matching.contains_key(&root) {
         warn!("Attempted to find augmenting path with matched root.");
         return None;
@@ -111,7 +107,7 @@ fn find_augmenting_path(graph: &Vec<Vec<usize>>, root: usize, matching: &HashMap
     while !node_queue.is_empty() {
         let node = node_queue.pop_front()?;
 
-        for adj in graph.get(node)?.iter().cloned() {
+        for adj in graph.get(&node)?.iter().cloned() {
             if !matching.contains_key(&adj) && adj != root {
                 parents.insert(adj, node);
                 other_end = Some(adj);
@@ -131,10 +127,6 @@ fn find_augmenting_path(graph: &Vec<Vec<usize>>, root: usize, matching: &HashMap
             // Augmenting path found.
             break;
         }
-    }
-
-    if other_end.is_none() {
-        return None;
     }
 
     let mut path = vec![other_end?];
@@ -180,48 +172,56 @@ mod tests {
     #[test]
     fn test_find_augmenting_path() {
         // An augmenting path that traverses through matched nodes.
-        let graph = vec![
-            vec![1, 3],
-            vec![0, 2],
-            vec![1, 3],
-            vec![2, 4],
-            vec![3, 5],
-            vec![4],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1, 3]),
+                (1, vec![0, 2]),
+                (2, vec![1, 3]),
+                (3, vec![2, 4]),
+                (4, vec![3, 5]),
+                (5, vec![4]),
+            ]
+        );
         let matching = HashMap::from([(1, 2), (2, 1), (3, 4), (4, 3)]);
         let x = find_augmenting_path(&graph, 0, &matching);
         assert!(x.is_some());
         assert_eq!(x.unwrap(), vec![0, 3, 4, 5]);
 
         // An augmenting path which goes from one unmatched node directly to another.
-        let graph = vec![
-            vec![1],
-            vec![0, 2],
-            vec![1, 3],
-            vec![2, 4],
-            vec![2, 3],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1]),
+                (1, vec![0, 2]),
+                (2, vec![1, 3]),
+                (3, vec![2, 4]),
+                (4, vec![2, 3]),
+            ]
+        );
         let matching = HashMap::from([(1, 2),(2, 1)]);
         let x = find_augmenting_path(&graph, 4, &matching);
         assert!(x.is_some());
         assert_eq!(x.unwrap(), vec![4, 3]);
         
         // There is no augmenting path; no other unmatched node exists.
-        let graph = vec![
-            vec![1],
-            vec![0, 2],
-            vec![1],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1]),
+                (1, vec![0, 2]),
+                (2, vec![1]),
+            ]
+        );
         let matching = HashMap::from([(0, 1),(1, 0)]);
         let x = find_augmenting_path(&graph, 2, &matching);
         assert!(x.is_none());
 
-        let graph = vec![
-            vec![1],
-            vec![2, 0, 3],
-            vec![1],
-            vec![1],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1]),
+                (1, vec![2, 0, 3]),
+                (2, vec![1]),
+                (3, vec![1]),
+            ]
+        );
         let matching = HashMap::from([(0, 1),(1, 0)]);
         let x = find_augmenting_path(&graph, 3, &matching);
         assert!(x.is_none());
@@ -253,41 +253,47 @@ mod tests {
     #[test]
     fn test_find_perfect_matching() {
         // A graph with a perfect matching.
-        let graph = vec![
-            vec![1, 3],
-            vec![0, 2],
-            vec![1, 3],
-            vec![2, 4],
-            vec![3, 5],
-            vec![4],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1, 3]),
+                (1, vec![0, 2]),
+                (2, vec![1, 3]),
+                (3, vec![2, 4]),
+                (4, vec![3, 5]),
+                (5, vec![4]),
+            ]
+        );
         let x = find_perfect_matching(&graph);
         assert!(x.is_some());
         assert_eq!(x.unwrap(), HashMap::from([(0, 1), (1, 0), (2, 3), (3, 2), (4, 5), (5, 4)]));
 
         // A graph with no perfect matching.
-        let graph = vec![
-            vec![1],
-            vec![2, 0, 3],
-            vec![1],
-            vec![1],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1]),
+                (1, vec![2, 0, 3]),
+                (2, vec![1]),
+                (3, vec![1]),
+            ]
+        );
         let x = find_perfect_matching(&graph);
         assert!(x.is_none());
         
         // Another graph with no perfect matching.
-        let graph = vec![
-            vec![1],
-            vec![0, 2],
-            vec![1, 3],
-            vec![2, 4],
-            vec![2, 3],
-        ];
+        let graph = HashMap::from(
+            [
+                (0, vec![1]),
+                (1, vec![0, 2]),
+                (2, vec![1, 3]),
+                (3, vec![2, 4]),
+                (4, vec![2, 3]),
+            ]
+        );
         let x = find_perfect_matching(&graph);
         assert!(x.is_none());
         
         // A perfect matching on an empty graph is vacuously true.
-        let graph = Vec::new();
+        let graph = HashMap::new();
         let x = find_perfect_matching(&graph);
         assert!(x.is_some());
     }

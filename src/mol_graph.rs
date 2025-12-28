@@ -1,6 +1,21 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS, ValenceTuple}, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
+use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
+
+#[derive(Debug)]
+pub struct GraphConstructionError {
+    pub smiles: String,
+    pub message: String,
+}
+
+impl GraphConstructionError {
+    pub fn new(smiles: String, message: String) -> Self {
+        Self {
+            smiles: smiles,
+            message: message,
+        }
+    }
+}
 
 struct MolecularGraphContext {
     mol_graph: MolecularGraph,
@@ -10,15 +25,13 @@ struct MolecularGraphContext {
 
 /// The delocalized subgraph.
 struct Subgraph {
-    included_nodes: HashSet<usize>,
-    included_edges: HashSet<(usize, usize)>,
+    adj_list: HashMap<usize, Vec<usize>>
 }
 
 impl Subgraph {
     pub fn new() -> Self {
         Self {
-            included_nodes: HashSet::new(),
-            included_edges: HashSet::new(),
+            adj_list: HashMap::new()
         }
     }
 }
@@ -90,8 +103,8 @@ impl MolecularGraph{
     fn add_ring_bonds(&mut self, l_atom_idx: usize, r_atom_idx: usize, order: f64, l_atom_stereo: Option<char>, r_atom_stereo: Option<char>) {
         let l_bond = DirectedBond::new(l_atom_idx, r_atom_idx, order, l_atom_stereo, true);
         let r_bond = DirectedBond::new(r_atom_idx, l_atom_idx, order, r_atom_stereo, true);
-        self.bond_map.insert((l_atom_idx, r_atom_idx), l_bond.clone());
-        self.bond_map.insert((r_atom_idx, l_atom_idx), r_bond.clone());
+        self.bond_map.insert((l_atom_idx, r_atom_idx), l_bond);
+        self.bond_map.insert((r_atom_idx, l_atom_idx), r_bond);
         self.adj_list[l_atom_idx].insert(r_atom_idx);
         self.adj_list[r_atom_idx].insert(l_atom_idx);
     }
@@ -149,7 +162,7 @@ impl Atom {
 }
 
 /// Reads a molecular graph from a SMILES string.
-pub fn create_mol_graph(smiles: &str) -> Result<MolecularGraph, SMILESParserError> {
+pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, SMILESParserError> {
     if smiles.is_empty() {
         return Err(SMILESParserError::new(smiles.to_string(), "Empty SMILES".to_string(), 0));
     }
@@ -161,12 +174,70 @@ pub fn create_mol_graph(smiles: &str) -> Result<MolecularGraph, SMILESParserErro
         derive_mol_from_tokens(&mut mol, &mut tokens_queue, smiles)?;
     }
 
-    let subgraph = create_delocalized_subgraph(&mol);
+    if kekulize {
+        let subgraph = create_delocalized_subgraph(&mol);
+        kekulize_mol(smiles, &mut mol, subgraph)?;
+    }
 
     return Ok(mol)
 }
 
+/// Kekulize a molecule.
+/// 
+/// This removes a molecule's aromatic data. Aromatic atoms/bonds will be set
+/// with either a single or double bond.
+fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> Result<bool, GraphConstructionError> {
+    for (src, dst_vec) in subgraph.adj_list.iter() {
+        for dst in dst_vec {
+            let src = *src;
+            let dst = *dst;
+
+            let (left_atoms, right_atoms) = mol.atoms.split_at_mut(src + 1);
+            let src_atom = &mut left_atoms[src];
+            let dst_atom = &mut right_atoms[dst - src + 1];
+            
+            // Reset the aromatic bond information. Use single bonds for the cycle.
+            let [maybe_src_dst_bond, maybe_dst_src_bond] = mol.bond_map.get_disjoint_mut([&(src, dst), &(dst, src)]);
+
+            match (maybe_src_dst_bond, maybe_dst_src_bond) {
+                (Some(src_dst_bond), Some(dst_src_bond)) => {
+                    src_dst_bond.order = 1.0;
+                    dst_src_bond.order = 1.0;
+                },
+                _ => {
+                    return Err(GraphConstructionError::new(
+                        smiles.to_string(),
+                        format!("An edge in the subgraph does not have a bond in molecular graph: ({src}, {dst}).").to_string()
+                    ));
+                }
+            }
+            src_atom.is_aromatic = false;
+            dst_atom.is_aromatic = false;
+        }
+    }
+
+    // Edges in the matching have their order set to 2.0 for double bond.
+    if let Some(matching) = find_perfect_matching(&subgraph.adj_list) {
+        for (src, dst) in matching.iter() {
+            let maybe_src_dst_bond = mol.bond_map.get_mut(&(*src, *dst));
+            if let Some(src_dst_bond) = maybe_src_dst_bond {
+                src_dst_bond.order = 2.0;
+            } else {
+                return Err(GraphConstructionError::new(
+                    smiles.to_string(),
+                    format!("An edge in the perfect matching does not have an edge in the subgraph: ({src}, {dst}).").to_string()
+                ));
+            }
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Creates a delocalized subgraph from a constructed MolecularGraph.
+/// 
+/// The result is an already pruned subgraph.
 fn create_delocalized_subgraph(mol: &MolecularGraph) -> Subgraph {
     let mut subgraph = Subgraph::new();
     let mut should_prune_map: HashMap<usize, bool> = HashMap::new();
@@ -178,9 +249,8 @@ fn create_delocalized_subgraph(mol: &MolecularGraph) -> Subgraph {
             if should_prune_src || should_prune_dst {
                 continue;
             }
-            subgraph.included_edges.insert((bond.src, bond.dst));
-            subgraph.included_nodes.insert(bond.src);
-            subgraph.included_nodes.insert(bond.dst);
+            subgraph.adj_list.entry(bond.src).or_default().push(bond.dst);
+            subgraph.adj_list.entry(bond.dst).or_default().push(bond.src);
         }
     }
     subgraph
@@ -394,7 +464,7 @@ fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>,
                 // All bond types must be defined in SMILES_BOND_ORDERS.
                 return Err(SMILESParserError::new(
                     smiles.to_string(),
-                    format!("Unknown bond char: '{}'.", bond_char),
+                    format!("Unknown bond character: '{}'.", bond_char),
                     token_idx,
                 ));
             }
@@ -408,17 +478,6 @@ fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>,
             return Ok((1.0, None));
         },
     }
-}
-
-fn get_bond_order(smiles: &str, index: usize, bond_char: &char) -> Result<f64, SMILESParserError> {
-    if let Some(v) = SMILES_BOND_ORDERS.get(bond_char) {
-        return Ok(*v);
-    }
-    Err(SMILESParserError::new(
-        smiles.to_string(),
-        format!("Unknown bond character '{}'.", bond_char).to_string(),
-        index,
-    ))
 }
 
 #[cfg(test)]
