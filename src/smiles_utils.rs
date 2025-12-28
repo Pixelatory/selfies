@@ -3,7 +3,7 @@ use std::{fmt, str::Chars};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::mol_graph::Atom;
+use crate::mol_graph::{Atom, GraphConstructionError};
 use crate::constants::{AROMATIC_SUBSET, ELEMENTS, ORGANIC_SUBSET, SMILES_BOND_ORDERS};
 use crate::utilities::{capitalize_first};
 
@@ -64,37 +64,6 @@ impl SMILESToken {
     }
 }
 
-// ---------- Error Handling ----------
-
-#[derive(Debug)]
-pub struct SMILESParserError {
-    pub smiles: String,
-    pub message: String,
-    pub index: usize,
-}
-
-impl SMILESParserError {
-    pub fn new(smiles: String, message: String, index: usize) -> Self {
-        Self {
-            smiles: smiles,
-            message: message,
-            index: index,
-        }
-    }
-}
-
-impl fmt::Display for SMILESParserError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "SMILESParserError at {}: {} (input: '{}')",
-            self.index, self.message, self.smiles
-        )
-    }
-}
-
-impl std::error::Error for SMILESParserError {}
-
 // ---------- Tokenizer Iterator ----------
 
 pub struct SMILESTokenizer<'a> {
@@ -114,7 +83,7 @@ impl<'a> SMILESTokenizer<'a> {
 }
 
 impl<'a> Iterator for SMILESTokenizer<'a> {
-    type Item = Result<SMILESToken, SMILESParserError>;
+    type Item = Result<SMILESToken, GraphConstructionError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let smiles = self.smiles;
@@ -146,11 +115,11 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
             };
 
             if i >= chars.len() {
-                return Some(Err(SMILESParserError::new(
-                    smiles.to_string(),
-                    "hanging bond".to_string(),
-                    i.saturating_sub(1),
-                )));
+                return Some(Err(GraphConstructionError::UnexpectedToken {
+                    smiles: smiles.to_string(),
+                    message: "Hanging bond.".to_string(),
+                    index: i.saturating_sub(1),
+                }));
             }
 
             let ch = chars[i];
@@ -193,21 +162,21 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                         token: smiles[i..end_idx].to_string(),
                     };
                 } else {
-                    return Some(Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "hanging bracket [".to_string(),
-                        i,
-                    )));
+                    return Some(Err(GraphConstructionError::UnexpectedToken {
+                        smiles: smiles.to_string(),
+                        message: "Hanging bracket '['.".to_string(),
+                        index: i,
+                    }));
                 }
 
             // BRANCHES.
             } else if ch == '(' || ch == ')' {
                 if bond_token.is_some() {
-                    return Some(Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "hanging bond".to_string(),
-                        bond_idx,
-                    )));
+                    return Some(Err(GraphConstructionError::UnexpectedToken {
+                        smiles: smiles.to_string(),
+                        message: "Hanging bond.".to_string(),
+                        index: bond_idx,
+                    }));
                 }
                 token = SMILESToken {
                     bond_token: None,
@@ -239,27 +208,27 @@ impl<'a> Iterator for SMILESTokenizer<'a> {
                             token: smiles[i..i + 3].to_string(),
                         };
                     } else {
-                        return Some(Err(SMILESParserError::new(
-                            smiles.to_string(),
-                            format!("invalid ring number '%{}'", rnum),
-                            i,
-                        )));
+                        return Some(Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: format!("Invalid ring number '%{}'.", rnum),
+                            index: i,
+                        }));
                     }
                 } else {
-                    return Some(Err(SMILESParserError::new(
-                        smiles.to_string(),
-                        "incomplete ring number".to_string(),
-                        i,
-                    )));
+                    return Some(Err(GraphConstructionError::UnexpectedToken {
+                        smiles: smiles.to_string(),
+                        message: "Incomplete ring number.".to_string(),
+                        index: i,
+                    }));
                 }
 
             // UNKNOWN SYMBOL.
             } else {
-                return Some(Err(SMILESParserError::new(
-                    smiles.to_string(),
-                    format!("unrecognized symbol '{}'", ch),
-                    i,
-                )));
+                return Some(Err(GraphConstructionError::UnexpectedToken {
+                    smiles: smiles.to_string(),
+                    message: format!("Unrecognized symbol '{}'.", ch),
+                    index: i,
+                }));
             }
 
             self.i = token.end_idx;
@@ -362,7 +331,6 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
 }
 
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,21 +421,3 @@ mod tests {
         assert_eq!(tokens, expected_tokens);
     }
 }
-
-
-/* Reads a molecular graph from a SMILES string.
-/// 
-/// #### Arguments
-/// - `smiles`: The input SMILES string.
-/// - `attributable`: If the molecular graph should include attributions.
-/// 
-/// #### Returns
-/// - A molecular graph that the input SMILES string represents, or
-///   a `SMILESParserError` if the input SMILES is invalid.
-*/
-/*fn smiles_to_mol(smiles: &str, attributable: bool) -> Result<MolecularGraph, SMILESParserError> {
-    if smiles == "" {
-        return Err(SMILESParserError{smiles: smiles.to_string(), message: "empty SMILES".to_string(), index: 0});
-    }
-    let mol = MolecularGraph
-}*/

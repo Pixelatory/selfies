@@ -1,21 +1,40 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{collections::{HashMap, HashSet, VecDeque}, fmt};
 
-use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESParserError, SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
+use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
 
 #[derive(Debug)]
-pub struct GraphConstructionError {
-    pub smiles: String,
-    pub message: String,
+pub enum GraphConstructionError {
+    /// An unexpected token was used during graph construction.
+    UnexpectedToken {
+        smiles: String,
+        message: String,
+        index: usize,
+    },
+    /// An edge is referenced through a pair of nodes, but the edge does not exist.
+    UnknownEdge {
+        smiles: String,
+        message: String,
+        src: usize,
+        dst: usize,
+    },
+    EmptySMILES
 }
 
-impl GraphConstructionError {
-    pub fn new(smiles: String, message: String) -> Self {
-        Self {
-            smiles: smiles,
-            message: message,
+impl fmt::Display for GraphConstructionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedToken {smiles, message, index} => {
+                write!(f, "{message} Index: {index}. SMILES: {smiles}.")
+            },
+            Self::UnknownEdge { smiles, message, src, dst } => {
+                write!(f, "{message} Bond: ({src}, {dst}). SMILES: {smiles}.")
+            },
+            Self::EmptySMILES => write!(f, "Empty SMILES string."),
         }
     }
 }
+
+impl std::error::Error for GraphConstructionError {}
 
 struct MolecularGraphContext {
     mol_graph: MolecularGraph,
@@ -162,12 +181,12 @@ impl Atom {
 }
 
 /// Reads a molecular graph from a SMILES string.
-pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, SMILESParserError> {
+pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, GraphConstructionError> {
     if smiles.is_empty() {
-        return Err(SMILESParserError::new(smiles.to_string(), "Empty SMILES".to_string(), 0));
+        return Err(GraphConstructionError::EmptySMILES);
     }
     let mut mol = MolecularGraph::new(false);
-    let tokens = SMILESTokenizer::new(smiles).into_iter().collect::<Result<Vec<SMILESToken>, SMILESParserError>>()?;
+    let tokens = SMILESTokenizer::new(smiles).into_iter().collect::<Result<Vec<SMILESToken>, GraphConstructionError>>()?;
     let mut tokens_queue = VecDeque::from(tokens);
 
     while !tokens_queue.is_empty() {
@@ -205,10 +224,12 @@ fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> R
                     dst_src_bond.order = 1.0;
                 },
                 _ => {
-                    return Err(GraphConstructionError::new(
-                        smiles.to_string(),
-                        format!("An edge in the subgraph does not have a bond in molecular graph: ({src}, {dst}).").to_string()
-                    ));
+                    return Err(GraphConstructionError::UnknownEdge {
+                        smiles: smiles.to_string(),
+                        message: format!("An edge in the subgraph does not have a bond in molecular graph.").to_string(),
+                        src: src,
+                        dst: dst,
+                    });
                 }
             }
             src_atom.is_aromatic = false;
@@ -223,10 +244,12 @@ fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> R
             if let Some(src_dst_bond) = maybe_src_dst_bond {
                 src_dst_bond.order = 2.0;
             } else {
-                return Err(GraphConstructionError::new(
-                    smiles.to_string(),
-                    format!("An edge in the perfect matching does not have an edge in the subgraph: ({src}, {dst}).").to_string()
-                ));
+                return Err(GraphConstructionError::UnknownEdge {
+                    smiles: smiles.to_string(),
+                    message: format!("An edge in the perfect matching does not have an edge in the subgraph.").to_string(),
+                    src: *src,
+                    dst: *dst,
+                });
             }
         }
         return Ok(true);
@@ -307,16 +330,16 @@ fn should_prune(mol: &MolecularGraph, node: usize) -> bool {
     };
 }
 
-fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph, maybe_prev_atom_idx: Option<usize>, prev_stack: &mut Vec<usize>) -> Result<(), SMILESParserError>{
+fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph, maybe_prev_atom_idx: Option<usize>, prev_stack: &mut Vec<usize>) -> Result<(), GraphConstructionError>{
     let curr = match smiles_to_atom(&token.token) {
         Some(atom) => atom,
         None => {
             return Err(
-                SMILESParserError::new(
-                    smiles.to_string(),
-                    format!("Invalid atom symbol {}", token.token),
-                    token.start_idx,
-                )
+                GraphConstructionError::UnexpectedToken {
+                    smiles: smiles.to_string(),
+                    message: format!("Invalid atom symbol {}", token.token),
+                    index: token.start_idx,
+                }
             )
         },
     };
@@ -347,7 +370,7 @@ fn derive_mol_from_tokens(
     mol: &mut MolecularGraph,
     tokens: &mut VecDeque<SMILESToken>,
     smiles: &str,
-) -> Result<usize, SMILESParserError> {
+) -> Result<usize, GraphConstructionError> {
     // Holds indexes of previous atoms in the graph.
     let mut prev_stack = Vec::new();
     // Holds (branch token char, branch token index).
@@ -369,19 +392,19 @@ fn derive_mol_from_tokens(
                         prev_stack.push(prev_atom_idx);
                         branch_stack.push((token.token, token.start_idx));
                     } else {
-                        return Err(SMILESParserError::new(
-                            smiles.to_string(),
-                            "Branch has no previous atom.".to_string(),
-                            token.start_idx,
-                        ));
+                        return Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: "Branch has no previous atom.".to_string(),
+                            index: token.start_idx,
+                        });
                     }
                 } else {
                     if branch_stack.is_empty() {
-                        return Err(SMILESParserError::new(
-                            smiles.to_string(),
-                            "Hanging ')' bracket".to_string(),
-                            token.start_idx,
-                        ));
+                        return Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: "Hanging ')' bracket".to_string(),
+                            index: token.start_idx,
+                        });
                     }
                     branch_stack.pop();
                     prev_stack.pop();
@@ -393,22 +416,22 @@ fn derive_mol_from_tokens(
                     if let Some(ratom_idx) = prev_stack.pop() {
                         // Validate whether a ring bond should be added.
                         if mol.has_bond(latom_idx, ratom_idx) {
-                            return Err(SMILESParserError::new(
-                                smiles.to_string(),
-                                "Attempted to make a ring bond between already-bonded atoms.".to_string(),
-                                token.start_idx,
-                            ));
+                            return Err(GraphConstructionError::UnexpectedToken {
+                                smiles: smiles.to_string(),
+                                message: "Attempted to make a ring bond between already-bonded atoms.".to_string(),
+                                index: token.start_idx,
+                            });
                         }
                         
                         match (maybe_latom_bond_char, token.bond_token) {
                             (Some(latom_bond_char), Some(ratom_bond_char)) => {
                                 if latom_bond_char != ratom_bond_char && 
                                 (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
-                                    return Err(SMILESParserError::new(
-                                        smiles.to_string(),
-                                        "A ring bond is specified at both ends, but they do not match.".to_string(),
-                                        token.start_idx,
-                                    ));
+                                    return Err(GraphConstructionError::UnexpectedToken {
+                                        smiles: smiles.to_string(),
+                                        message: "A ring bond is specified at both ends, but they do not match.".to_string(),
+                                        index: token.start_idx,
+                                    });
                                 }
                             }
                             _ => {},
@@ -430,22 +453,22 @@ fn derive_mol_from_tokens(
 
                         mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
                     } else {
-                        return Err(SMILESParserError::new(
-                            smiles.to_string(),
-                            "Ending ring token has no previous atom.".to_string(),
-                            token.start_idx,
-                        ));
+                        return Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: "Ending ring token has no previous atom.".to_string(),
+                            index: token.start_idx,
+                        });
                     }
                 } else {
                     // The starting ring bond token.
                     if let Some(prev_atom_idx) = maybe_prev_atom_idx {
                         ring_log.insert(token.token.clone(), (token.bond_token, prev_atom_idx));
                     } else {
-                        return Err(SMILESParserError::new(
-                            smiles.to_string(),
-                            "Starting ring token has no previous atom.".to_string(),
-                            token.start_idx,
-                        ));
+                        return Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: "Starting ring token has no previous atom.".to_string(),
+                            index: token.start_idx,
+                        });
                     }
                 }
             }
@@ -454,7 +477,7 @@ fn derive_mol_from_tokens(
     return Ok(2);
 }
 
-fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>, curr_atom: &Atom, prev_atom: &Atom) -> Result<(f64, Option<char>), SMILESParserError> {
+fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>, curr_atom: &Atom, prev_atom: &Atom) -> Result<(f64, Option<char>), GraphConstructionError> {
     match maybe_bond_char {
         Some(bond_char) => {
             if let Some(bond_order) = SMILES_BOND_ORDERS.get(&bond_char) {
@@ -462,11 +485,11 @@ fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>,
                 return Ok((*bond_order, stereo_bond_char));
             } else {
                 // All bond types must be defined in SMILES_BOND_ORDERS.
-                return Err(SMILESParserError::new(
-                    smiles.to_string(),
-                    format!("Unknown bond character: '{}'.", bond_char),
-                    token_idx,
-                ));
+                return Err(GraphConstructionError::UnexpectedToken {
+                    smiles: smiles.to_string(),
+                    message: format!("Unknown bond character: '{}'.", bond_char),
+                    index: token_idx,
+                });
             }
         }
         None => {
@@ -486,15 +509,13 @@ mod tests {
 
     #[test]
     fn test_empty_string() {
-        let x = create_mol_graph("");
-        assert!(x.is_err());
-        assert_eq!(x.as_ref().unwrap_err().index, 0);
-        assert_eq!(x.as_ref().unwrap_err().message, "Empty SMILES");
+        let x = create_mol_graph("", false);
+        assert!(matches!(x, Err(GraphConstructionError::EmptySMILES)));
     }
 
     #[test]
     fn test_create_mol_graph_stereo() {
-        let x = create_mol_graph("F/C=C\\F");
+        let x = create_mol_graph("F/C=C\\F", false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
@@ -527,17 +548,17 @@ mod tests {
 
     #[test]
     fn test_create_mol_graph_dot() {
-        let x = create_mol_graph("[Cu+2].[O-]S(=O)(=O)[O-]");
+        let x = create_mol_graph("[Cu+2].[O-]S(=O)(=O)[O-]", false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
         let expected_atoms = vec![
-            Atom::new("Cu".to_string(), false, None, None, None, 2),
-            Atom::new("O".to_string(), false, None, None, None, -1),
+            Atom::new("Cu".to_string(), false, None, None, Some(0), 2),
+            Atom::new("O".to_string(), false, None, None, Some(0), -1),
             Atom::new("S".to_string(), false, None, None, None, 0),
             Atom::new("O".to_string(), false, None, None, None, 0),
             Atom::new("O".to_string(), false, None, None, None, 0),
-            Atom::new("O".to_string(), false, None, None, None, -1),
+            Atom::new("O".to_string(), false, None, None, Some(0), -1),
         ];
         let expected_adj_list = vec![
             HashSet::new(),  // Cu+2 has no bonds with any other atom.
@@ -566,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_create_mol_graph_ring_bond() {
-        let x = create_mol_graph("O1C(CCl)=CCN=1");
+        let x = create_mol_graph("O1C(CCl)=CCN=1", false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
