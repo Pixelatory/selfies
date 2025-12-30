@@ -331,6 +331,56 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
 }
 
 
+/// Converts an Atom into its SMILES representation.
+/// 
+/// If brackets is true, brackets will be added around the returned symbol.
+/// I.e. [C] or [C@@H] instead of C or C@@H, respectively.
+pub fn atom_to_smiles(atom: &Atom, brackets: bool) -> String {
+    let specs = (&atom.isotope, &atom.chirality, &atom.h_count, &atom.charge);
+    if specs == (&None, &None, &None, &0) {
+        return atom.element.clone();
+    } else {
+        let mut result = String::new();
+        // Opening bracket.
+        if brackets {
+            result.push('[');
+        }
+        // Isotope.
+        if let Some(isotope) = &atom.isotope {
+            result.push_str(&isotope.to_string());
+        }
+        // Atomic element.
+        result.push_str(&atom.element);
+        // Chirality.
+        if let Some(chirality) = &atom.chirality {
+            result.push_str(chirality);
+        }
+        // Hydrogen count.
+        if let Some(h_count) = &atom.h_count {
+            let h_count = *h_count;
+            if h_count != 0 {
+                result.push('H');
+            }
+            if h_count > 1 {
+                result.push_str(&h_count.to_string());
+            }
+        }
+        // Atomic charge.
+        if atom.charge == 1 {
+            result.push('+');
+        } else if atom.charge > 0 {
+            result.push_str(&format!("+{}", atom.charge));
+        } else if atom.charge < 0 {
+            result.push_str(&atom.charge.to_string());
+        }
+        if brackets {
+            result.push(']');
+        }
+        result
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +430,40 @@ mod tests {
             x.unwrap(),
             Atom::new(String::from("C"), true, None, None, None, 0)
         );
+    }
+
+    #[test]
+    fn test_atom_to_smiles() {
+        // Positive charge, and multiple hydrogen.
+        let atom = Atom::new(String::from("O"), false, None, None, Some(3), 1);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("[OH3+]"));
+
+        // Negative charge, and no hydrogen.
+        let atom = Atom::new(String::from("Co"), false, None, None, Some(0), -3);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("[Co-3]"));
+
+        // Has isotope information. Aromatic information is ignored.
+        // Single hydrogen.
+        let atom = Atom::new(String::from("C"), true, Some(14), None, Some(1), 0);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("[14CH]"));
+        
+        // Has chirality information.
+        let atom = Atom::new(String::from("C"), false, None, Some(String::from("@@")), Some(1), 0);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("[C@@H]"));
+        
+        // Some unknown element can still be converted to a SMILES string.
+        let atom = Atom::new(String::from("Zh"), false, None, Some(String::from("@@")), Some(1), 0);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("[Zh@@H]"));
+
+        // Brackets is set to true, but the atom does not require brackets.
+        let atom = Atom::new(String::from("C"), true, None, None, None, 0);
+        let x = atom_to_smiles(&atom, true);
+        assert_eq!(x, String::from("C"));
     }
 
     #[test]
