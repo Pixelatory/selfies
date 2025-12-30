@@ -10,7 +10,7 @@ use log::warn;
 /// Returns a hashmap representing a perfect matching, where the key is the
 /// graph node, and the value is the matching node. Returns None, if the graph
 /// cannot be perfectly matched.
-pub fn find_perfect_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashMap<usize, usize>> {
+pub fn find_perfect_matching(graph: &HashMap<usize, HashSet<usize>>) -> Option<HashMap<usize, usize>> {
     let mut matching = greedy_matching(graph)?;
 
     let mut unmatched: HashSet<usize> = (0..graph.len()).into_iter()
@@ -43,7 +43,7 @@ pub fn find_perfect_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashM
 /// Picks the node with the least unmatched neighbours, and then matches
 /// with the first unmatched neighbour. Repeats this process until no more
 /// matchings can be made.
-fn greedy_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashMap<usize, usize>> {
+fn greedy_matching(graph: &HashMap<usize, HashSet<usize>>) -> Option<HashMap<usize, usize>> {
     let mut matching = HashMap::new();
     // free_degrees[i] = number of unmatched neighbors for node i.
     let mut free_degrees: HashMap<usize, usize> = graph.iter().map(|(node, adj_nodes)| (*node, adj_nodes.len())).collect();
@@ -92,7 +92,7 @@ fn greedy_matching(graph: &HashMap<usize, Vec<usize>>) -> Option<HashMap<usize, 
 /// traversing through a matched edge and an unmatched edge.
 /// 
 /// Returns the vertex path, or None if there is no augmenting path.
-fn find_augmenting_path(graph: &HashMap<usize, Vec<usize>>, root: usize, matching: &HashMap<usize, usize>) -> Option<Vec<usize>> {
+fn find_augmenting_path(graph: &HashMap<usize, HashSet<usize>>, root: usize, matching: &HashMap<usize, usize>) -> Option<Vec<usize>> {
     if matching.contains_key(&root) {
         warn!("Attempted to find augmenting path with matched root.");
         return None;
@@ -174,12 +174,12 @@ mod tests {
         // An augmenting path that traverses through matched nodes.
         let graph = HashMap::from(
             [
-                (0, vec![1, 3]),
-                (1, vec![0, 2]),
-                (2, vec![1, 3]),
-                (3, vec![2, 4]),
-                (4, vec![3, 5]),
-                (5, vec![4]),
+                (0, HashSet::from([1, 3])),
+                (1, HashSet::from([0, 2])),
+                (2, HashSet::from([1, 3])),
+                (3, HashSet::from([2, 4])),
+                (4, HashSet::from([3, 5])),
+                (5, HashSet::from([4])),
             ]
         );
         let matching = HashMap::from([(1, 2), (2, 1), (3, 4), (4, 3)]);
@@ -190,11 +190,11 @@ mod tests {
         // An augmenting path which goes from one unmatched node directly to another.
         let graph = HashMap::from(
             [
-                (0, vec![1]),
-                (1, vec![0, 2]),
-                (2, vec![1, 3]),
-                (3, vec![2, 4]),
-                (4, vec![2, 3]),
+                (0, HashSet::from([1])),
+                (1, HashSet::from([0, 2])),
+                (2, HashSet::from([1, 3])),
+                (3, HashSet::from([2, 4])),
+                (4, HashSet::from([2, 3])),
             ]
         );
         let matching = HashMap::from([(1, 2),(2, 1)]);
@@ -205,9 +205,9 @@ mod tests {
         // There is no augmenting path; no other unmatched node exists.
         let graph = HashMap::from(
             [
-                (0, vec![1]),
-                (1, vec![0, 2]),
-                (2, vec![1]),
+                (0, HashSet::from([1])),
+                (1, HashSet::from([0, 2])),
+                (2, HashSet::from([1])),
             ]
         );
         let matching = HashMap::from([(0, 1),(1, 0)]);
@@ -216,10 +216,10 @@ mod tests {
 
         let graph = HashMap::from(
             [
-                (0, vec![1]),
-                (1, vec![2, 0, 3]),
-                (2, vec![1]),
-                (3, vec![1]),
+                (0, HashSet::from([1])),
+                (1, HashSet::from([2, 0, 3])),
+                (2, HashSet::from([1])),
+                (3, HashSet::from([1])),
             ]
         );
         let matching = HashMap::from([(0, 1),(1, 0)]);
@@ -255,12 +255,12 @@ mod tests {
         // A graph with a perfect matching.
         let graph = HashMap::from(
             [
-                (0, vec![1, 3]),
-                (1, vec![0, 2]),
-                (2, vec![1, 3]),
-                (3, vec![2, 4]),
-                (4, vec![3, 5]),
-                (5, vec![4]),
+                (0, HashSet::from([1, 3])),
+                (1, HashSet::from([0, 2])),
+                (2, HashSet::from([1, 3])),
+                (3, HashSet::from([2, 4])),
+                (4, HashSet::from([3, 5])),
+                (5, HashSet::from([4])),
             ]
         );
         let x = find_perfect_matching(&graph);
@@ -270,10 +270,10 @@ mod tests {
         // A graph with no perfect matching.
         let graph = HashMap::from(
             [
-                (0, vec![1]),
-                (1, vec![2, 0, 3]),
-                (2, vec![1]),
-                (3, vec![1]),
+                (0, HashSet::from([1])),
+                (1, HashSet::from([2, 0, 3])),
+                (2, HashSet::from([1])),
+                (3, HashSet::from([1])),
             ]
         );
         let x = find_perfect_matching(&graph);
@@ -282,11 +282,11 @@ mod tests {
         // Another graph with no perfect matching.
         let graph = HashMap::from(
             [
-                (0, vec![1]),
-                (1, vec![0, 2]),
-                (2, vec![1, 3]),
-                (3, vec![2, 4]),
-                (4, vec![2, 3]),
+                (0, HashSet::from([1])),
+                (1, HashSet::from([0, 2])),
+                (2, HashSet::from([1, 3])),
+                (3, HashSet::from([2, 4])),
+                (4, HashSet::from([2, 3])),
             ]
         );
         let x = find_perfect_matching(&graph);

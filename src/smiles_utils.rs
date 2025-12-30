@@ -247,7 +247,7 @@ pub fn smiles_to_atom(atom_symbol: &str) -> Option<Atom> {
     if ORGANIC_SUBSET.contains(atom_symbol) {
         return Some(Atom::new(atom_symbol.to_string(),  false, None, None, None, 0));
     } else if AROMATIC_SUBSET.contains(atom_symbol) {
-        return Some(Atom::new(atom_symbol.to_string(), true, None, None, None, 0));
+        return Some(Atom::new(atom_symbol.to_string().to_uppercase(), true, None, None, None, 0));
     } else if !(*chars.first()? == '[' && *chars.last()? == ']') {
         return None;
     }
@@ -372,6 +372,14 @@ mod tests {
         // Unknown element.
         let x = smiles_to_atom("[Zh++]");
         assert!(x.is_none());
+        
+        // Aromatic element.
+        let x = smiles_to_atom("c");
+        assert!(x.is_some());
+        assert_eq!(
+            x.unwrap(),
+            Atom::new(String::from("C"), true, None, None, None, 0)
+        );
     }
 
     #[test]

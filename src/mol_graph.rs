@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, fmt};
 
-use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{last_valence, valence_any}};
+use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{get_mut_pair, last_valence, valence_any}};
 
 #[derive(Debug)]
 pub enum GraphConstructionError {
@@ -44,7 +44,7 @@ struct MolecularGraphContext {
 
 /// The delocalized subgraph.
 struct Subgraph {
-    adj_list: HashMap<usize, Vec<usize>>
+    adj_list: HashMap<usize, HashSet<usize>>
 }
 
 impl Subgraph {
@@ -201,19 +201,17 @@ pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, 
     return Ok(mol)
 }
 
-/// Kekulize a molecule.
+/// Dearomatizes atoms in the molecular graph according to the subgraph.
 /// 
-/// This removes a molecule's aromatic data. Aromatic atoms/bonds will be set
-/// with either a single or double bond.
-fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> Result<bool, GraphConstructionError> {
+/// Atoms that have a corresponding sub-node have their aromatic flag set to false.
+/// Bonds that have a corresponding sub-edge have their order set to 1.0.
+fn dearomatize_atoms(smiles: &str, mol: &mut MolecularGraph, subgraph: &Subgraph) -> Result<(), GraphConstructionError> {
     for (src, dst_vec) in subgraph.adj_list.iter() {
         for dst in dst_vec {
             let src = *src;
             let dst = *dst;
 
-            let (left_atoms, right_atoms) = mol.atoms.split_at_mut(src + 1);
-            let src_atom = &mut left_atoms[src];
-            let dst_atom = &mut right_atoms[dst - src + 1];
+            let (src_atom, dst_atom) = get_mut_pair(&mut mol.atoms, src, dst);
             
             // Reset the aromatic bond information. Use single bonds for the cycle.
             let [maybe_src_dst_bond, maybe_dst_src_bond] = mol.bond_map.get_disjoint_mut([&(src, dst), &(dst, src)]);
@@ -237,8 +235,18 @@ fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> R
         }
     }
 
-    // Edges in the matching have their order set to 2.0 for double bond.
+    Ok(())
+}
+
+/// Kekulize a molecule.
+/// 
+/// This removes a molecule's aromatic data. Aromatic atoms/bonds will be set
+/// with either a single or double bond.
+fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> Result<bool, GraphConstructionError> {
     if let Some(matching) = find_perfect_matching(&subgraph.adj_list) {
+        dearomatize_atoms(smiles, mol, &subgraph)?;
+
+        // Edges in the matching have their order set to 2.0 for a double bond.
         for (src, dst) in matching.iter() {
             let maybe_src_dst_bond = mol.bond_map.get_mut(&(*src, *dst));
             if let Some(src_dst_bond) = maybe_src_dst_bond {
@@ -272,8 +280,8 @@ fn create_delocalized_subgraph(mol: &MolecularGraph) -> Subgraph {
             if should_prune_src || should_prune_dst {
                 continue;
             }
-            subgraph.adj_list.entry(bond.src).or_default().push(bond.dst);
-            subgraph.adj_list.entry(bond.dst).or_default().push(bond.src);
+            subgraph.adj_list.entry(bond.src).or_default().insert(bond.dst);
+            subgraph.adj_list.entry(bond.dst).or_default().insert(bond.src);
         }
     }
     subgraph
@@ -330,7 +338,12 @@ fn should_prune(mol: &MolecularGraph, node: usize) -> bool {
     };
 }
 
-fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph, maybe_prev_atom_idx: Option<usize>, prev_stack: &mut Vec<usize>) -> Result<(), GraphConstructionError>{
+fn handle_atom_token(
+    smiles: &str,
+    token: &SMILESToken,
+    mol: &mut MolecularGraph,
+    prev_stack: &mut Vec<usize>,
+) -> Result<(), GraphConstructionError>{
     let curr = match smiles_to_atom(&token.token) {
         Some(atom) => atom,
         None => {
@@ -348,15 +361,15 @@ fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph
     let inserted_idx = mol.add_atom(&curr);
     
     // Add bonds to the graph if there's a previous atom.
-    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
+    if let Some(prev_atom_idx) = prev_stack.last() {
         let (order, stereo_bond_char) = smiles_to_bond(
             smiles,
             token.start_idx,
             token.bond_token,
             &curr,
-            &mol.atoms[prev_atom_idx],
+            &mol.atoms[*prev_atom_idx],
         )?;
-        mol.add_bond(prev_atom_idx, inserted_idx, order, stereo_bond_char);
+        mol.add_bond(*prev_atom_idx, inserted_idx, order, stereo_bond_char);
     }
 
     // Remove the previous atom index, and add the current inserted index as the previous index.
@@ -366,11 +379,43 @@ fn handle_atom_token(token: &SMILESToken, smiles: &str, mol: &mut MolecularGraph
     Ok(())
 }
 
+fn handle_branch_token(
+    smiles: &str,
+    token: &SMILESToken,
+    prev_stack: &mut Vec<usize>,
+    branch_stack: &mut Vec<(String, usize)>,
+) -> Result<(), GraphConstructionError> {
+    if &token.token == "(" {
+        if let Some(prev_atom_idx) = prev_stack.last() {
+            prev_stack.push(*prev_atom_idx);
+            branch_stack.push((token.token.clone(), token.start_idx));
+        } else {
+            return Err(GraphConstructionError::UnexpectedToken {
+                smiles: smiles.to_string(),
+                message: "Branch has no previous atom.".to_string(),
+                index: token.start_idx,
+            });
+        }
+    } else {
+        if branch_stack.is_empty() {
+            return Err(GraphConstructionError::UnexpectedToken {
+                smiles: smiles.to_string(),
+                message: "Hanging ')' bracket.".to_string(),
+                index: token.start_idx,
+            });
+        }
+        branch_stack.pop();
+        prev_stack.pop();
+    }
+
+    Ok(())
+}
+
 fn derive_mol_from_tokens(
     mol: &mut MolecularGraph,
     tokens: &mut VecDeque<SMILESToken>,
     smiles: &str,
-) -> Result<usize, GraphConstructionError> {
+) -> Result<(), GraphConstructionError> {
     // Holds indexes of previous atoms in the graph.
     let mut prev_stack = Vec::new();
     // Holds (branch token char, branch token index).
@@ -379,41 +424,15 @@ fn derive_mol_from_tokens(
 
     while !tokens.is_empty() {
         let token = tokens.pop_front().unwrap();
-        let maybe_prev_atom_idx = prev_stack.get(prev_stack.len().saturating_sub(1)).copied();
-
         match token.token_type {
-            SMILESTokenType::Dot => {
-                break;
-            },
-            SMILESTokenType::Atom => handle_atom_token(&token, smiles, mol, maybe_prev_atom_idx, &mut prev_stack)?,
-            SMILESTokenType::Branch => {
-                if token.token == "(" {
-                    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
-                        prev_stack.push(prev_atom_idx);
-                        branch_stack.push((token.token, token.start_idx));
-                    } else {
-                        return Err(GraphConstructionError::UnexpectedToken {
-                            smiles: smiles.to_string(),
-                            message: "Branch has no previous atom.".to_string(),
-                            index: token.start_idx,
-                        });
-                    }
-                } else {
-                    if branch_stack.is_empty() {
-                        return Err(GraphConstructionError::UnexpectedToken {
-                            smiles: smiles.to_string(),
-                            message: "Hanging ')' bracket".to_string(),
-                            index: token.start_idx,
-                        });
-                    }
-                    branch_stack.pop();
-                    prev_stack.pop();
-                }
-            },
+            SMILESTokenType::Dot => break,
+            SMILESTokenType::Atom => handle_atom_token(smiles, &token, mol, &mut prev_stack)?,
+            SMILESTokenType::Branch => handle_branch_token(smiles, &token, &mut prev_stack, &mut branch_stack)?,
             SMILESTokenType::Ring => {
                 if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
                     // The ending ring bond token.
-                    if let Some(ratom_idx) = prev_stack.pop() {
+                    if let Some(ratom_idx) = prev_stack.last() {
+                        let ratom_idx = *ratom_idx;
                         // Validate whether a ring bond should be added.
                         if mol.has_bond(latom_idx, ratom_idx) {
                             return Err(GraphConstructionError::UnexpectedToken {
@@ -461,8 +480,8 @@ fn derive_mol_from_tokens(
                     }
                 } else {
                     // The starting ring bond token.
-                    if let Some(prev_atom_idx) = maybe_prev_atom_idx {
-                        ring_log.insert(token.token.clone(), (token.bond_token, prev_atom_idx));
+                    if let Some(prev_atom_idx) = prev_stack.last() {
+                        ring_log.insert(token.token.clone(), (token.bond_token, *prev_atom_idx));
                     } else {
                         return Err(GraphConstructionError::UnexpectedToken {
                             smiles: smiles.to_string(),
@@ -474,7 +493,7 @@ fn derive_mol_from_tokens(
             }
         }
     }
-    return Ok(2);
+    Ok(())
 }
 
 fn smiles_to_bond(smiles: &str, token_idx: usize, maybe_bond_char: Option<char>, curr_atom: &Atom, prev_atom: &Atom) -> Result<(f64, Option<char>), GraphConstructionError> {
@@ -636,5 +655,164 @@ mod tests {
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+    }
+
+    /// A molecule cannot be kekulized if there is no perfect matching.
+    #[test]
+    fn test_unkekulized_no_perfect_matching() {
+        let x = create_mol_graph("n1c[nH]cc1", true);
+        assert!(x.is_ok());
+        let x = x.unwrap();
+        // [nH] is pruned from the subgraph.
+        assert_eq!(should_prune(&x, 2), true);
+
+        let expected_atoms = vec![
+            Atom::new("N".to_string(), true, None, None, None, 0),
+            Atom::new("C".to_string(), true, None, None, None, 0),
+            Atom::new("N".to_string(), true, None, None, Some(1), 0),
+            Atom::new("C".to_string(), true, None, None, None, 0),
+            Atom::new("C".to_string(), true, None, None, None, 0),
+        ];
+        let expected_adj_list = vec![
+            HashSet::from([1, 4]),
+            HashSet::from([0, 2]),
+            HashSet::from([1, 3]),
+            HashSet::from([2, 4]),
+            HashSet::from([3, 0]),
+        ];
+        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((0, 1), DirectedBond::new(0, 1, 1.5, None, false)),
+                ((1, 0), DirectedBond::new(1, 0, 1.5, None, false)),
+
+                ((1, 2), DirectedBond::new(1, 2, 1.5, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 1.5, None, false)),
+
+                ((2, 3), DirectedBond::new(2, 3, 1.5, None, false)),
+                ((3, 2), DirectedBond::new(3, 2, 1.5, None, false)),
+
+                ((4, 3), DirectedBond::new(4, 3, 1.5, None, false)),
+                ((3, 4), DirectedBond::new(3, 4, 1.5, None, false)),
+
+                ((0, 4), DirectedBond::new(0, 4, 1.5, None, true)),
+                ((4, 0), DirectedBond::new(4, 0, 1.5, None, true)),
+            ]
+        );
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert_eq!(x.bond_map, expected_bond_map);
+    }
+
+    #[test]
+    fn test_kekulized_mol_defined_bond() {
+        // A single bond is defined in what would otherwise be an aromatic ring.
+        let x = create_mol_graph("c1ccc#cc1", true);
+        assert!(x.is_ok());
+        let x = x.unwrap();
+        let expected_atoms = vec![
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+        ];
+        let expected_adj_list = vec![
+            HashSet::from([1, 5]),
+            HashSet::from([0, 2]),
+            HashSet::from([1, 3]),
+            HashSet::from([2, 4]),
+            HashSet::from([3, 5]),
+            HashSet::from([4, 0]),
+        ];
+        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((0, 1), DirectedBond::new(0, 1, 2.0, None, false)),
+                ((1, 0), DirectedBond::new(1, 0, 2.0, None, false)),
+
+                ((1, 2), DirectedBond::new(1, 2, 1.0, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 1.0, None, false)),
+
+                ((2, 3), DirectedBond::new(2, 3, 2.0, None, false)),
+                ((3, 2), DirectedBond::new(3, 2, 2.0, None, false)),
+
+                ((4, 3), DirectedBond::new(4, 3, 3.0, None, false)),
+                ((3, 4), DirectedBond::new(3, 4, 3.0, None, false)),
+
+                ((4, 5), DirectedBond::new(4, 5, 2.0, None, false)),
+                ((5, 4), DirectedBond::new(5, 4, 2.0, None, false)),
+
+                ((5, 0), DirectedBond::new(5, 0, 1.0, None, true)),
+                ((0, 5), DirectedBond::new(0, 5, 1.0, None, true)),
+            ]
+        );
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert_eq!(x.bond_map, expected_bond_map);
+    }
+
+    /// A kekulized molecule removes the aromatic flags.
+    #[test]
+    fn test_kekulized_mol() {
+        let x = create_mol_graph("c1cc(ccc1)C", true);
+        assert!(x.is_ok());
+        let x = x.unwrap();
+        let expected_atoms = vec![
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+            Atom::new("C".to_string(), false, None, None, None, 0),
+        ];
+        let expected_adj_list = vec![
+            HashSet::from([1, 5]),
+            HashSet::from([0, 2]),
+            HashSet::from([1, 3, 6]),
+            HashSet::from([2, 4]),
+            HashSet::from([3, 5]),
+            HashSet::from([4, 0]),
+            HashSet::from([2]),
+        ];
+        let expected_bond_map_1: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+            [
+                ((0, 1), DirectedBond::new(0, 1, 1.0, None, false)),
+                ((1, 0), DirectedBond::new(1, 0, 1.0, None, false)),
+
+                ((1, 2), DirectedBond::new(1, 2, 2.0, None, false)),
+                ((2, 1), DirectedBond::new(2, 1, 2.0, None, false)),
+
+                ((2, 3), DirectedBond::new(2, 3, 1.0, None, false)),
+                ((3, 2), DirectedBond::new(3, 2, 1.0, None, false)),
+
+                ((4, 3), DirectedBond::new(4, 3, 2.0, None, false)),
+                ((3, 4), DirectedBond::new(3, 4, 2.0, None, false)),
+
+                ((4, 5), DirectedBond::new(4, 5, 1.0, None, false)),
+                ((5, 4), DirectedBond::new(5, 4, 1.0, None, false)),
+
+                ((5, 0), DirectedBond::new(5, 0, 2.0, None, true)),
+                ((0, 5), DirectedBond::new(0, 5, 2.0, None, true)),
+
+                ((2, 6), DirectedBond::new(2, 6, 1.0, None, false)),
+                ((6, 2), DirectedBond::new(6, 2, 1.0, None, false)),
+            ]
+        );
+        // Kekulization could return one of two bond formations, depending on the matching.
+        // expected_bond_map_2 reverses the single and double bonds in the aromatic ring.
+        let mut expected_bond_map_2 = expected_bond_map_1.clone();
+        for ((src, dst), bond) in expected_bond_map_2.iter_mut() {
+            if *src != 6 && *dst != 6 {
+                if bond.order == 2.0 {
+                    bond.order = 1.0;
+                } else {
+                    bond.order = 2.0;
+                }
+            }
+        }
+        assert_eq!(x.atoms, expected_atoms);
+        assert_eq!(x.adj_list, expected_adj_list);
+        assert!(x.bond_map == expected_bond_map_1 || x.bond_map == expected_bond_map_2);
     }
 }
