@@ -17,6 +17,9 @@ pub enum GraphConstructionError {
         src: usize,
         dst: usize,
     },
+    CannotKekulize {
+        smiles: String
+    },
     EmptySMILES
 }
 
@@ -28,6 +31,9 @@ impl fmt::Display for GraphConstructionError {
             },
             Self::UnknownEdge { smiles, message, src, dst } => {
                 write!(f, "{message} Bond: ({src}, {dst}). SMILES: {smiles}.")
+            },
+            Self::CannotKekulize { smiles } => {
+                write!(f, "Could not kekulize molecule: {smiles}.")
             },
             Self::EmptySMILES => write!(f, "Empty SMILES string."),
         }
@@ -193,7 +199,10 @@ pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, 
 
     if kekulize {
         let subgraph = create_delocalized_subgraph(&mol);
-        kekulize_mol(smiles, &mut mol, subgraph)?;
+        let kekulized = kekulize_mol(smiles, &mut mol, subgraph)?;
+        if !kekulized {
+            return Err(GraphConstructionError::CannotKekulize { smiles: smiles.to_string() });
+        }
     }
 
     return Ok(mol)
@@ -673,7 +682,7 @@ mod tests {
     /// A molecule cannot be kekulized if there is no perfect matching.
     #[test]
     fn test_unkekulized_no_perfect_matching() {
-        let x = create_mol_graph("n1c[nH]cc1", true);
+        let x = create_mol_graph("n1c[nH]cc1", false);
         assert!(x.is_ok());
         let x = x.unwrap();
         // [nH] is pruned from the subgraph.
@@ -714,6 +723,10 @@ mod tests {
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+
+        // A CannotKekulize error occurs if we attempt to kekulize and fail.
+        let x = create_mol_graph("n1c[nH]cc1", true);
+        assert!(matches!(x.err().unwrap(), GraphConstructionError::CannotKekulize { smiles: _ }))
     }
 
     #[test]
