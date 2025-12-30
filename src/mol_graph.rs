@@ -189,9 +189,7 @@ pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, 
     let tokens = SMILESTokenizer::new(smiles).into_iter().collect::<Result<Vec<SMILESToken>, GraphConstructionError>>()?;
     let mut tokens_queue = VecDeque::from(tokens);
 
-    while !tokens_queue.is_empty() {
-        derive_mol_from_tokens(&mut mol, &mut tokens_queue, smiles)?;
-    }
+    derive_mol_from_tokens(&mut mol, &mut tokens_queue, smiles)?;
 
     if kekulize {
         let subgraph = create_delocalized_subgraph(&mol);
@@ -411,6 +409,77 @@ fn handle_branch_token(
     Ok(())
 }
 
+fn handle_ring_token(
+    smiles: &str,
+    token: &SMILESToken,
+    mol: &mut MolecularGraph,
+    prev_stack: &Vec<usize>,
+    ring_log: &mut HashMap<String, (Option<char>, usize)>,
+) -> Result<(), GraphConstructionError> {
+    if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
+        // The ending ring bond token.
+        if let Some(ratom_idx) = prev_stack.last() {
+            let ratom_idx = *ratom_idx;
+            // Validate whether a ring bond should be added.
+            if mol.has_bond(latom_idx, ratom_idx) {
+                return Err(GraphConstructionError::UnexpectedToken {
+                    smiles: smiles.to_string(),
+                    message: "Attempted to make a ring bond between already-bonded atoms.".to_string(),
+                    index: token.start_idx,
+                });
+            }
+            
+            match (maybe_latom_bond_char, token.bond_token) {
+                (Some(latom_bond_char), Some(ratom_bond_char)) => {
+                    if latom_bond_char != ratom_bond_char && 
+                    (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
+                        return Err(GraphConstructionError::UnexpectedToken {
+                            smiles: smiles.to_string(),
+                            message: "A ring bond is specified at both ends, but the bond type does not match.".to_string(),
+                            index: token.start_idx,
+                        });
+                    }
+                }
+                _ => {},
+            };
+            
+            // Attempt to include a ring bond.
+            let latom = &mol.atoms[latom_idx];
+            let ratom = &mol.atoms[ratom_idx];
+
+            let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
+            let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
+            
+            let order: f64;
+            if latom.is_aromatic && ratom.is_aromatic && maybe_latom_bond_char.is_none() && token.bond_token.is_none() {
+                order = 1.5;
+            } else {
+                order = l_order.max(r_order);
+            }
+
+            mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
+        } else {
+            return Err(GraphConstructionError::UnexpectedToken {
+                smiles: smiles.to_string(),
+                message: "Ending ring token has no previous atom.".to_string(),
+                index: token.start_idx,
+            });
+        }
+    } else {
+        // The starting ring bond token.
+        if let Some(prev_atom_idx) = prev_stack.last() {
+            ring_log.insert(token.token.clone(), (token.bond_token, *prev_atom_idx));
+        } else {
+            return Err(GraphConstructionError::UnexpectedToken {
+                smiles: smiles.to_string(),
+                message: "Starting ring token has no previous atom.".to_string(),
+                index: token.start_idx,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn derive_mol_from_tokens(
     mol: &mut MolecularGraph,
     tokens: &mut VecDeque<SMILESToken>,
@@ -420,77 +489,21 @@ fn derive_mol_from_tokens(
     let mut prev_stack = Vec::new();
     // Holds (branch token char, branch token index).
     let mut branch_stack = Vec::new();
+    // Maps a ring token string to tuple of bond char and previous atom index.
     let mut ring_log = HashMap::new();
 
     while !tokens.is_empty() {
         let token = tokens.pop_front().unwrap();
         match token.token_type {
-            SMILESTokenType::Dot => break,
+            SMILESTokenType::Dot => {
+                // Clear all containers, as if starting from scratch with a new molecule.
+                prev_stack.clear();
+                branch_stack.clear();
+                ring_log.clear();
+            },
             SMILESTokenType::Atom => handle_atom_token(smiles, &token, mol, &mut prev_stack)?,
             SMILESTokenType::Branch => handle_branch_token(smiles, &token, &mut prev_stack, &mut branch_stack)?,
-            SMILESTokenType::Ring => {
-                if let Some((maybe_latom_bond_char, latom_idx)) = ring_log.remove(&token.token) {
-                    // The ending ring bond token.
-                    if let Some(ratom_idx) = prev_stack.last() {
-                        let ratom_idx = *ratom_idx;
-                        // Validate whether a ring bond should be added.
-                        if mol.has_bond(latom_idx, ratom_idx) {
-                            return Err(GraphConstructionError::UnexpectedToken {
-                                smiles: smiles.to_string(),
-                                message: "Attempted to make a ring bond between already-bonded atoms.".to_string(),
-                                index: token.start_idx,
-                            });
-                        }
-                        
-                        match (maybe_latom_bond_char, token.bond_token) {
-                            (Some(latom_bond_char), Some(ratom_bond_char)) => {
-                                if latom_bond_char != ratom_bond_char && 
-                                (!SMILES_STEREO_BONDS.contains(&latom_bond_char) || !SMILES_STEREO_BONDS.contains(&ratom_bond_char)) {
-                                    return Err(GraphConstructionError::UnexpectedToken {
-                                        smiles: smiles.to_string(),
-                                        message: "A ring bond is specified at both ends, but they do not match.".to_string(),
-                                        index: token.start_idx,
-                                    });
-                                }
-                            }
-                            _ => {},
-                        };
-                        
-                        // Attempt to include a ring bond.
-                        let latom = &mol.atoms[latom_idx];
-                        let ratom = &mol.atoms[ratom_idx];
-
-                        let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
-                        let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
-                        
-                        let order: f64;
-                        if latom.is_aromatic && ratom.is_aromatic && maybe_latom_bond_char.is_none() && token.bond_token.is_none() {
-                            order = 1.5;
-                        } else {
-                            order = l_order.max(r_order);
-                        }
-
-                        mol.add_ring_bonds(latom_idx, ratom_idx, order, l_stereo, r_stereo);
-                    } else {
-                        return Err(GraphConstructionError::UnexpectedToken {
-                            smiles: smiles.to_string(),
-                            message: "Ending ring token has no previous atom.".to_string(),
-                            index: token.start_idx,
-                        });
-                    }
-                } else {
-                    // The starting ring bond token.
-                    if let Some(prev_atom_idx) = prev_stack.last() {
-                        ring_log.insert(token.token.clone(), (token.bond_token, *prev_atom_idx));
-                    } else {
-                        return Err(GraphConstructionError::UnexpectedToken {
-                            smiles: smiles.to_string(),
-                            message: "Starting ring token has no previous atom.".to_string(),
-                            index: token.start_idx,
-                        });
-                    }
-                }
-            }
+            SMILESTokenType::Ring => handle_ring_token(smiles, &token, mol, &prev_stack, &mut ring_log)?,
         }
     }
     Ok(())
