@@ -3,6 +3,7 @@ mod mol_graph;
 mod constants;
 mod utilities;
 mod matching_utils;
+mod bond_constraints;
 
 #[pyo3::pymodule]
 mod selfies_rust {
@@ -13,7 +14,7 @@ mod selfies_rust {
     #[pyfunction]
     #[pyo3(text_signature = "(smiles: str strict: bool attribute: bool) -> list[str]")]
     fn encoder(smiles: String, strict: Option<bool>, attribute: Option<bool>) -> PyResult<Vec<String>> {
-        let mol = create_mol_graph(&smiles, true).unwrap();
+        let mol = create_mol_graph(&smiles, true, true).unwrap();
 
         return Ok(Vec::new());
     }

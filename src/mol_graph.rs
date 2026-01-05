@@ -1,6 +1,12 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, fmt};
 
-use crate::{constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, matching_utils::find_perfect_matching, smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{get_mut_pair, last_valence, valence_any}};
+use crate::{
+    bond_constraints::{check_bond_constraints},
+    constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS},
+    matching_utils::find_perfect_matching,
+    smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom},
+    utilities::{get_mut_pair, last_valence, valence_any}
+};
 
 #[derive(Debug)]
 pub enum GraphConstructionError {
@@ -20,6 +26,7 @@ pub enum GraphConstructionError {
     CannotKekulize {
         smiles: String
     },
+    InvalidBondConstraints {message: String},
     EmptySMILES
 }
 
@@ -34,6 +41,9 @@ impl fmt::Display for GraphConstructionError {
             },
             Self::CannotKekulize { smiles } => {
                 write!(f, "Could not kekulize molecule: {smiles}.")
+            },
+            Self::InvalidBondConstraints { message } => {
+                write!(f, "{message}")
             },
             Self::EmptySMILES => write!(f, "Empty SMILES string."),
         }
@@ -92,6 +102,8 @@ pub struct MolecularGraph {
     bond_map: HashMap<(usize, usize), DirectedBond>,
     /// Adjacency list, representing this graph. Stores indices of atoms.
     adj_list: Vec<HashSet<usize>>,
+    /// Stores the bond count for each atom in the graph.
+    bond_count: Vec<f64>,
 }
 
 impl MolecularGraph{
@@ -100,6 +112,7 @@ impl MolecularGraph{
             atoms: Vec::new(),
             bond_map: HashMap::new(),
             adj_list: Vec::new(),
+            bond_count: Vec::new(),
         }
     }
 
@@ -113,25 +126,45 @@ impl MolecularGraph{
     fn add_atom(&mut self, atom: &Atom) -> usize {
         self.atoms.push(atom.clone());
         self.adj_list.push(HashSet::new());
+        self.bond_count.push(0.0);
+
         self.adj_list.len() - 1
     }
 
     fn add_bond(&mut self, source: usize, destination: usize, order: f64, stereo_bond_char: Option<char>) {
         let src_dst_bond = DirectedBond::new(source, destination, order, stereo_bond_char, false);
         let dst_src_bond = DirectedBond::new(destination, source, order, stereo_bond_char, false);
+
         self.bond_map.insert((source, destination), src_dst_bond);
         self.bond_map.insert((destination, source), dst_src_bond);
+
         self.adj_list[source].insert(destination);
         self.adj_list[destination].insert(source);
+
+        self.bond_count[source] += order;
+        self.bond_count[destination] += order;
     }
 
     fn add_ring_bonds(&mut self, l_atom_idx: usize, r_atom_idx: usize, order: f64, l_atom_stereo: Option<char>, r_atom_stereo: Option<char>) {
         let l_bond = DirectedBond::new(l_atom_idx, r_atom_idx, order, l_atom_stereo, true);
         let r_bond = DirectedBond::new(r_atom_idx, l_atom_idx, order, r_atom_stereo, true);
+
         self.bond_map.insert((l_atom_idx, r_atom_idx), l_bond);
         self.bond_map.insert((r_atom_idx, l_atom_idx), r_bond);
+
         self.adj_list[l_atom_idx].insert(r_atom_idx);
         self.adj_list[r_atom_idx].insert(l_atom_idx);
+
+        self.bond_count[l_atom_idx] += order;
+        self.bond_count[r_atom_idx] += order;
+    }
+
+    pub fn get_atoms(&self) -> &Vec<Atom> {
+        return &self.atoms;
+    }
+
+    pub fn get_bond_count(&self, atom_index: usize) -> f64 {
+        return self.bond_count[atom_index];
     }
 }
 
@@ -187,7 +220,7 @@ impl Atom {
 }
 
 /// Reads a molecular graph from a SMILES string.
-pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, GraphConstructionError> {
+pub fn create_mol_graph(smiles: &str, kekulize: bool, strict: bool) -> Result<MolecularGraph, GraphConstructionError> {
     if smiles.is_empty() {
         return Err(GraphConstructionError::EmptySMILES);
     }
@@ -203,6 +236,10 @@ pub fn create_mol_graph(smiles: &str, kekulize: bool) -> Result<MolecularGraph, 
         if !kekulized {
             return Err(GraphConstructionError::CannotKekulize { smiles: smiles.to_string() });
         }
+    }
+
+    if strict {
+        check_bond_constraints(&mol, smiles)?;
     }
 
     return Ok(mol)
@@ -225,6 +262,10 @@ fn dearomatize_atoms(smiles: &str, mol: &mut MolecularGraph, subgraph: &Subgraph
 
             match (maybe_src_dst_bond, maybe_dst_src_bond) {
                 (Some(src_dst_bond), Some(dst_src_bond)) => {
+                    let old_order = src_dst_bond.order;
+                    mol.bond_count[src] += 1.0 - old_order;
+                    mol.bond_count[dst] += 1.0 - old_order;
+
                     src_dst_bond.order = 1.0;
                     dst_src_bond.order = 1.0;
                 },
@@ -257,6 +298,8 @@ fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> R
         for (src, dst) in matching.iter() {
             let maybe_src_dst_bond = mol.bond_map.get_mut(&(*src, *dst));
             if let Some(src_dst_bond) = maybe_src_dst_bond {
+                mol.bond_count[*src] += 2.0 - src_dst_bond.order;
+                mol.bond_count[*dst] += 2.0 - src_dst_bond.order;
                 src_dst_bond.order = 2.0;
             } else {
                 return Err(GraphConstructionError::UnknownEdge {
@@ -550,13 +593,13 @@ mod tests {
 
     #[test]
     fn test_empty_string() {
-        let x = create_mol_graph("", false);
+        let x = create_mol_graph("", false, false);
         assert!(matches!(x, Err(GraphConstructionError::EmptySMILES)));
     }
 
     #[test]
     fn test_create_mol_graph_stereo() {
-        let x = create_mol_graph("F/C=C\\F", false);
+        let x = create_mol_graph("F/C=C\\F", false, false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
@@ -572,7 +615,7 @@ mod tests {
             HashSet::from([1, 3]),
             HashSet::from([2]),
         ];
-        let expected_bond_map: HashMap<(usize, usize), DirectedBond> = HashMap::from(
+        let expected_bond_map = HashMap::from(
             [
                 ((0, 1), DirectedBond::new(0, 1, 1.0, Some('/'), false)),
                 ((1, 0), DirectedBond::new(1, 0, 1.0, Some('/'), false)),
@@ -582,14 +625,16 @@ mod tests {
                 ((3, 2), DirectedBond::new(3, 2, 1.0, Some('\\'), false)),
             ]
         );
+        let expected_bond_count = vec![1.0, 3.0, 3.0, 1.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+        assert_eq!(x.bond_count, expected_bond_count);
     }
 
     #[test]
     fn test_create_mol_graph_dot() {
-        let x = create_mol_graph("[Cu+2].[O-]S(=O)(=O)[O-]", false);
+        let x = create_mol_graph("[Cu+2].[O-]S(=O)(=O)[O-]", false, false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
@@ -621,14 +666,16 @@ mod tests {
                 ((5, 2), DirectedBond::new(5, 2, 1.0, None, false)),
             ]
         );
+        let expected_bond_count = vec![0.0, 1.0, 6.0, 2.0, 2.0, 1.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+        assert_eq!(x.bond_count, expected_bond_count);
     }
 
     #[test]
     fn test_create_mol_graph_ring_bond() {
-        let x = create_mol_graph("O1C(CCl)=CCN=1", false);
+        let x = create_mol_graph("O1C(CCl)=CCN=1", false, false);
         assert!(x.is_ok());
         let x = x.unwrap();
 
@@ -674,15 +721,17 @@ mod tests {
                 ((0, 6), DirectedBond::new(0, 6, 2.0, None, true)),
             ]
         );
+        let expected_bond_count = vec![3.0, 4.0, 2.0, 1.0, 3.0, 2.0, 3.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+        assert_eq!(x.bond_count, expected_bond_count);
     }
 
     /// A molecule cannot be kekulized if there is no perfect matching.
     #[test]
     fn test_unkekulized_no_perfect_matching() {
-        let x = create_mol_graph("n1c[nH]cc1", false);
+        let x = create_mol_graph("n1c[nH]cc1", false, false);
         assert!(x.is_ok());
         let x = x.unwrap();
         // [nH] is pruned from the subgraph.
@@ -720,19 +769,21 @@ mod tests {
                 ((4, 0), DirectedBond::new(4, 0, 1.5, None, true)),
             ]
         );
+        let expected_bond_count = vec![3.0, 3.0, 3.0, 3.0, 3.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+        assert_eq!(x.bond_count, expected_bond_count);
 
         // A CannotKekulize error occurs if we attempt to kekulize and fail.
-        let x = create_mol_graph("n1c[nH]cc1", true);
+        let x = create_mol_graph("n1c[nH]cc1", true, false);
         assert!(matches!(x.err().unwrap(), GraphConstructionError::CannotKekulize { smiles: _ }))
     }
 
     #[test]
     fn test_kekulized_mol_defined_bond() {
         // A single bond is defined in what would otherwise be an aromatic ring.
-        let x = create_mol_graph("c1ccc#cc1", true);
+        let x = create_mol_graph("c1ccc#cc1", true, false);
         assert!(x.is_ok());
         let x = x.unwrap();
         let expected_atoms = vec![
@@ -772,15 +823,17 @@ mod tests {
                 ((0, 5), DirectedBond::new(0, 5, 1.0, None, true)),
             ]
         );
+        let expected_bond_count = vec![4.0, 4.0, 4.0, 6.0, 6.0, 4.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
+        assert_eq!(x.bond_count, expected_bond_count);
     }
 
     /// A kekulized molecule removes the aromatic flags.
     #[test]
     fn test_kekulized_mol() {
-        let x = create_mol_graph("c1cc(ccc1)C", true);
+        let x = create_mol_graph("c1cc(ccc1)C", true, false);
         assert!(x.is_ok());
         let x = x.unwrap();
         let expected_atoms = vec![
@@ -837,8 +890,21 @@ mod tests {
                 }
             }
         }
+        let expected_bond_count = vec![4.0, 4.0, 5.0, 4.0, 4.0, 4.0, 1.0];
         assert_eq!(x.atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert!(x.bond_map == expected_bond_map_1 || x.bond_map == expected_bond_map_2);
+        assert_eq!(x.bond_count, expected_bond_count);
+    }
+
+    #[test]
+    fn test_strict_check() {
+        let x = create_mol_graph("c1cc(ccc1)C", true, true);
+        assert!(x.is_err());
+        assert!(matches!(x.unwrap_err(), GraphConstructionError::InvalidBondConstraints {message: _}));
+
+        let x = create_mol_graph("c1ccc#cc1", true, true);
+        assert!(x.is_err());
+        assert!(matches!(x.unwrap_err(), GraphConstructionError::InvalidBondConstraints {message: _}));
     }
 }
