@@ -906,5 +906,9 @@ mod tests {
         let x = create_mol_graph("c1ccc#cc1", true, true);
         assert!(x.is_err());
         assert!(matches!(x.unwrap_err(), GraphConstructionError::InvalidBondConstraints {message: _}));
+
+        let x = create_mol_graph("F#C", true, true);
+        assert!(x.is_err());
+        assert!(matches!(x.unwrap_err(), GraphConstructionError::InvalidBondConstraints {message: _}));
     }
 }

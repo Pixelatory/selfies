@@ -67,7 +67,7 @@ pub fn check_bond_constraints(mol: &MolecularGraph, smiles: &str) -> Result<(), 
 
         for (smiles, bond_count, bond_cap) in troubled_smiles {
             error_message += &format!(
-                "\t[{} with {} bond(s) - a max of {} bond(s) was specified]",
+                "\t[{} with {} bond(s) - a max of {} bond(s) is allowed]",
                 smiles, bond_count, bond_cap,
             );
         }
