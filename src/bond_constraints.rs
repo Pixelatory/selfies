@@ -52,9 +52,10 @@ fn get_bonding_capacity(element: &str, charge: i32) -> u32 {
 /// An atom's bond count cannot exceed its bonding capacity.
 pub fn check_bond_constraints(mol: &MolecularGraph, smiles: &str) -> Result<(), GraphConstructionError> {
     let mut troubled_smiles = Vec::new();
-    for (atom_index, atom) in mol.get_atoms().iter().enumerate() {
+    for atom_data in mol.get_atom_data().iter() {
+        let atom = &atom_data.atom;
         let bond_cap = get_bonding_capacity(&atom.element, atom.charge) as f64;
-        let bond_count = mol.get_bond_count(atom_index);
+        let bond_count = atom_data.bond_count;
         if bond_count > bond_cap {
             troubled_smiles.push((atom_to_smiles(atom, true), bond_count, bond_cap));
         }

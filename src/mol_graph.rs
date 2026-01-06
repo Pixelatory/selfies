@@ -96,23 +96,20 @@ impl Attribution {
 /// and bonds in the string.
 #[derive(Debug)]
 pub struct MolecularGraph {
-    /// Stores atoms in this graph.
-    atoms: Vec<Atom>,
+    /// Stores atom data for this graph.
+    atom_data: Vec<AtomData>,
     /// Stores all bonds in this graph.
     bond_map: HashMap<(usize, usize), DirectedBond>,
     /// Adjacency list, representing this graph. Stores indices of atoms.
     adj_list: Vec<HashSet<usize>>,
-    /// Stores the bond count for each atom in the graph.
-    bond_count: Vec<f64>,
 }
 
 impl MolecularGraph{
-    fn new(attributable: bool) -> Self {
+    fn new() -> Self {
         Self {
-            atoms: Vec::new(),
+            atom_data: Vec::new(),
             bond_map: HashMap::new(),
             adj_list: Vec::new(),
-            bond_count: Vec::new(),
         }
     }
 
@@ -124,9 +121,8 @@ impl MolecularGraph{
     /// 
     /// Returns the index of the inserted atom.
     fn add_atom(&mut self, atom: &Atom) -> usize {
-        self.atoms.push(atom.clone());
+        self.atom_data.push(AtomData::new(atom.clone()));
         self.adj_list.push(HashSet::new());
-        self.bond_count.push(0.0);
 
         self.adj_list.len() - 1
     }
@@ -141,8 +137,8 @@ impl MolecularGraph{
         self.adj_list[source].insert(destination);
         self.adj_list[destination].insert(source);
 
-        self.bond_count[source] += order;
-        self.bond_count[destination] += order;
+        self.atom_data[source].bond_count += order;
+        self.atom_data[destination].bond_count += order;
     }
 
     fn add_ring_bonds(&mut self, l_atom_idx: usize, r_atom_idx: usize, order: f64, l_atom_stereo: Option<char>, r_atom_stereo: Option<char>) {
@@ -155,16 +151,12 @@ impl MolecularGraph{
         self.adj_list[l_atom_idx].insert(r_atom_idx);
         self.adj_list[r_atom_idx].insert(l_atom_idx);
 
-        self.bond_count[l_atom_idx] += order;
-        self.bond_count[r_atom_idx] += order;
+        self.atom_data[l_atom_idx].bond_count += order;
+        self.atom_data[r_atom_idx].bond_count += order;
     }
 
-    pub fn get_atoms(&self) -> &Vec<Atom> {
-        return &self.atoms;
-    }
-
-    pub fn get_bond_count(&self, atom_index: usize) -> f64 {
-        return self.bond_count[atom_index];
+    pub fn get_atom_data(&self) -> &Vec<AtomData> {
+        return &self.atom_data;
     }
 }
 
@@ -219,12 +211,27 @@ impl Atom {
     }
 }
 
+#[derive(Debug)]
+pub struct AtomData {
+    pub atom: Atom,
+    pub bond_count: f64,
+}
+
+impl AtomData {
+    pub fn new(atom: Atom) -> Self {
+        Self {
+            atom: atom,
+            bond_count: 0.0,
+        }
+    }
+}
+
 /// Reads a molecular graph from a SMILES string.
 pub fn create_mol_graph(smiles: &str, kekulize: bool, strict: bool) -> Result<MolecularGraph, GraphConstructionError> {
     if smiles.is_empty() {
         return Err(GraphConstructionError::EmptySMILES);
     }
-    let mut mol = MolecularGraph::new(false);
+    let mut mol = MolecularGraph::new();
     let tokens = SMILESTokenizer::new(smiles).into_iter().collect::<Result<Vec<SMILESToken>, GraphConstructionError>>()?;
     let mut tokens_queue = VecDeque::from(tokens);
 
@@ -255,7 +262,7 @@ fn dearomatize_atoms(smiles: &str, mol: &mut MolecularGraph, subgraph: &Subgraph
             let src = *src;
             let dst = *dst;
 
-            let (src_atom, dst_atom) = get_mut_pair(&mut mol.atoms, src, dst);
+            let (src_atom, dst_atom) = get_mut_pair(&mut mol.atom_data, src, dst);
             
             // Reset the aromatic bond information. Use single bonds for the cycle.
             let [maybe_src_dst_bond, maybe_dst_src_bond] = mol.bond_map.get_disjoint_mut([&(src, dst), &(dst, src)]);
@@ -263,8 +270,8 @@ fn dearomatize_atoms(smiles: &str, mol: &mut MolecularGraph, subgraph: &Subgraph
             match (maybe_src_dst_bond, maybe_dst_src_bond) {
                 (Some(src_dst_bond), Some(dst_src_bond)) => {
                     let old_order = src_dst_bond.order;
-                    mol.bond_count[src] += 1.0 - old_order;
-                    mol.bond_count[dst] += 1.0 - old_order;
+                    src_atom.bond_count += 1.0 - old_order;
+                    dst_atom.bond_count += 1.0 - old_order;
 
                     src_dst_bond.order = 1.0;
                     dst_src_bond.order = 1.0;
@@ -278,8 +285,8 @@ fn dearomatize_atoms(smiles: &str, mol: &mut MolecularGraph, subgraph: &Subgraph
                     });
                 }
             }
-            src_atom.is_aromatic = false;
-            dst_atom.is_aromatic = false;
+            src_atom.atom.is_aromatic = false;
+            dst_atom.atom.is_aromatic = false;
         }
     }
 
@@ -298,8 +305,9 @@ fn kekulize_mol(smiles: &str, mol: &mut MolecularGraph, subgraph: Subgraph) -> R
         for (src, dst) in matching.iter() {
             let maybe_src_dst_bond = mol.bond_map.get_mut(&(*src, *dst));
             if let Some(src_dst_bond) = maybe_src_dst_bond {
-                mol.bond_count[*src] += 2.0 - src_dst_bond.order;
-                mol.bond_count[*dst] += 2.0 - src_dst_bond.order;
+                let (src_atom, dst_atom) = get_mut_pair(&mut mol.atom_data, *src, *dst);
+                src_atom.bond_count += 2.0 - src_dst_bond.order;
+                dst_atom.bond_count += 2.0 - src_dst_bond.order;
                 src_dst_bond.order = 2.0;
             } else {
                 return Err(GraphConstructionError::UnknownEdge {
@@ -358,7 +366,7 @@ fn should_prune(mol: &MolecularGraph, node: usize) -> bool {
         return true;
     }
 
-    let atom = &mol.atoms[node];
+    let atom = &mol.atom_data[node].atom;
     let valences = &AROMATIC_VALENCES[&atom.element.as_str()];
 
     // Each bond in delocalized subgraph has order 1.5 - treat them as single bonds.
@@ -417,7 +425,7 @@ fn handle_atom_token(
             token.start_idx,
             token.bond_token,
             &curr,
-            &mol.atoms[*prev_atom_idx],
+            &mol.atom_data[*prev_atom_idx].atom,
         )?;
         mol.add_bond(*prev_atom_idx, inserted_idx, order, stereo_bond_char);
     }
@@ -496,8 +504,8 @@ fn handle_ring_token(
             };
             
             // Attempt to include a ring bond.
-            let latom = &mol.atoms[latom_idx];
-            let ratom = &mol.atoms[ratom_idx];
+            let latom = &mol.atom_data[latom_idx].atom;
+            let ratom = &mol.atom_data[ratom_idx].atom;
 
             let (l_order, l_stereo) = smiles_to_bond(smiles, token.start_idx, maybe_latom_bond_char, ratom, latom)?;
             let (r_order, r_stereo) = smiles_to_bond(smiles, token.start_idx, token.bond_token, latom, ratom)?;
@@ -626,10 +634,12 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![1.0, 3.0, 3.0, 1.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
     }
 
     #[test]
@@ -667,10 +677,12 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![0.0, 1.0, 6.0, 2.0, 2.0, 1.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
     }
 
     #[test]
@@ -722,10 +734,12 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![3.0, 4.0, 2.0, 1.0, 3.0, 2.0, 3.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
     }
 
     /// A molecule cannot be kekulized if there is no perfect matching.
@@ -770,10 +784,12 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![3.0, 3.0, 3.0, 3.0, 3.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
 
         // A CannotKekulize error occurs if we attempt to kekulize and fail.
         let x = create_mol_graph("n1c[nH]cc1", true, false);
@@ -824,10 +840,12 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![4.0, 4.0, 4.0, 6.0, 6.0, 4.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
     }
 
     /// A kekulized molecule removes the aromatic flags.
@@ -891,10 +909,12 @@ mod tests {
             }
         }
         let expected_bond_count = vec![4.0, 4.0, 5.0, 4.0, 4.0, 4.0, 1.0];
-        assert_eq!(x.atoms, expected_atoms);
+        let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
+        let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert!(x.bond_map == expected_bond_map_1 || x.bond_map == expected_bond_map_2);
-        assert_eq!(x.bond_count, expected_bond_count);
+        assert_eq!(bond_count, expected_bond_count);
     }
 
     #[test]
