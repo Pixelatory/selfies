@@ -153,6 +153,9 @@ impl MolecularGraph{
 
         self.atom_data[l_atom_idx].bond_count += order;
         self.atom_data[r_atom_idx].bond_count += order;
+
+        self.atom_data[l_atom_idx].has_ring_bond = true;
+        self.atom_data[r_atom_idx].has_ring_bond = true;
     }
 
     pub fn get_atom_data(&self) -> &Vec<AtomData> {
@@ -215,6 +218,7 @@ impl Atom {
 pub struct AtomData {
     pub atom: Atom,
     pub bond_count: f64,
+    pub has_ring_bond: bool,
 }
 
 impl AtomData {
@@ -222,6 +226,7 @@ impl AtomData {
         Self {
             atom: atom,
             bond_count: 0.0,
+            has_ring_bond: false,
         }
     }
 }
@@ -634,12 +639,16 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![1.0, 3.0, 3.0, 1.0];
+        let expected_has_ring_bond = vec![false, false, false, false];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
     }
 
     #[test]
@@ -677,12 +686,16 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![0.0, 1.0, 6.0, 2.0, 2.0, 1.0];
+        let expected_has_ring_bond = vec![false, false, false, false, false, false];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
     }
 
     #[test]
@@ -734,12 +747,16 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![3.0, 4.0, 2.0, 1.0, 3.0, 2.0, 3.0];
+        let expected_has_ring_bond = vec![true, false, false, false, false, false, true];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
     }
 
     /// A molecule cannot be kekulized if there is no perfect matching.
@@ -784,12 +801,16 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![3.0, 3.0, 3.0, 3.0, 3.0];
+        let expected_has_ring_bond = vec![true, false, false, false, true];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
 
         // A CannotKekulize error occurs if we attempt to kekulize and fail.
         let x = create_mol_graph("n1c[nH]cc1", true, false);
@@ -798,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_kekulized_mol_defined_bond() {
-        // A single bond is defined in what would otherwise be an aromatic ring.
+        // A bond is defined in an aromatic ring.
         let x = create_mol_graph("c1ccc#cc1", true, false);
         assert!(x.is_ok());
         let x = x.unwrap();
@@ -840,12 +861,16 @@ mod tests {
             ]
         );
         let expected_bond_count = vec![4.0, 4.0, 4.0, 6.0, 6.0, 4.0];
+        let expected_has_ring_bond = vec![true, false, false, false, false, true];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert_eq!(x.bond_map, expected_bond_map);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
     }
 
     /// A kekulized molecule removes the aromatic flags.
@@ -909,12 +934,16 @@ mod tests {
             }
         }
         let expected_bond_count = vec![4.0, 4.0, 5.0, 4.0, 4.0, 4.0, 1.0];
+        let expected_has_ring_bond = vec![true, false, false, false, false, true, false];
+
         let atoms: Vec<Atom> = x.atom_data.iter().map(|x| x.atom.clone()).collect();
         let bond_count: Vec<f64> = x.atom_data.iter().map(|x| x.bond_count).collect();
+        let has_ring_bond: Vec<bool> = x.atom_data.iter().map(|x| x.has_ring_bond).collect();
         assert_eq!(atoms, expected_atoms);
         assert_eq!(x.adj_list, expected_adj_list);
         assert!(x.bond_map == expected_bond_map_1 || x.bond_map == expected_bond_map_2);
         assert_eq!(bond_count, expected_bond_count);
+        assert_eq!(has_ring_bond, expected_has_ring_bond);
     }
 
     #[test]
