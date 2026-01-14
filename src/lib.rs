@@ -1,9 +1,13 @@
+use crate::mol_graph::DirectedBond;
+
 mod smiles_utils;
 mod mol_graph;
 mod constants;
 mod utilities;
 mod matching_utils;
 mod bond_constraints;
+mod errors;
+mod encoder;
 
 #[pyo3::pymodule]
 mod selfies_rust {

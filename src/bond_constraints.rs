@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use once_cell::sync::Lazy;
 
-use crate::{mol_graph::{GraphConstructionError, MolecularGraph}, smiles_utils::atom_to_smiles};
+use crate::{errors::GraphConstructionError, mol_graph::MolecularGraph, smiles_utils::atom_to_smiles};
 
 static UNKNOWN_CONSTRAINT: u32 = 8;
 static CURRENT_CONSTRAINTS: Lazy<HashMap<String, u32>> = Lazy::new(|| HashMap::from(

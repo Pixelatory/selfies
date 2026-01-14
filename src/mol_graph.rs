@@ -1,56 +1,8 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, fmt};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
-    bond_constraints::{check_bond_constraints},
-    constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS},
-    matching_utils::find_perfect_matching,
-    smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom},
-    utilities::{get_mut_pair, last_valence, valence_any}
+    bond_constraints::check_bond_constraints, constants::{AROMATIC_VALENCES, SMILES_BOND_ORDERS, SMILES_STEREO_BONDS, VALENCE_ELECTRONS}, errors::GraphConstructionError, matching_utils::find_perfect_matching, smiles_utils::{SMILESToken, SMILESTokenType, SMILESTokenizer, smiles_to_atom}, utilities::{get_mut_pair, last_valence, valence_any}
 };
-
-#[derive(Debug)]
-pub enum GraphConstructionError {
-    /// An unexpected token was used during graph construction.
-    UnexpectedToken {
-        smiles: String,
-        message: String,
-        index: usize,
-    },
-    /// An edge is referenced through a pair of nodes, but the edge does not exist.
-    UnknownEdge {
-        smiles: String,
-        message: String,
-        src: usize,
-        dst: usize,
-    },
-    CannotKekulize {
-        smiles: String
-    },
-    InvalidBondConstraints {message: String},
-    EmptySMILES
-}
-
-impl fmt::Display for GraphConstructionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedToken {smiles, message, index} => {
-                write!(f, "{message} Index: {index}. SMILES: {smiles}.")
-            },
-            Self::UnknownEdge { smiles, message, src, dst } => {
-                write!(f, "{message} Bond: ({src}, {dst}). SMILES: {smiles}.")
-            },
-            Self::CannotKekulize { smiles } => {
-                write!(f, "Could not kekulize molecule: {smiles}.")
-            },
-            Self::InvalidBondConstraints { message } => {
-                write!(f, "{message}")
-            },
-            Self::EmptySMILES => write!(f, "Empty SMILES string."),
-        }
-    }
-}
-
-impl std::error::Error for GraphConstructionError {}
 
 struct MolecularGraphContext {
     mol_graph: MolecularGraph,
@@ -165,11 +117,11 @@ impl MolecularGraph{
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirectedBond {
-    src: usize,
-    dst: usize,
-    order: f64,
-    stereo: Option<char>,
-    ring_bond: bool,
+    pub src: usize,
+    pub dst: usize,
+    pub order: f64,
+    pub stereo: Option<char>,
+    pub ring_bond: bool,
 }
 
 impl DirectedBond {

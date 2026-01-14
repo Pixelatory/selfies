@@ -3,7 +3,8 @@ use std::{fmt, str::Chars};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::mol_graph::{Atom, GraphConstructionError};
+use crate::errors::{EncoderError, GraphConstructionError};
+use crate::mol_graph::{Atom, DirectedBond};
 use crate::constants::{AROMATIC_SUBSET, ELEMENTS, ORGANIC_SUBSET, SMILES_BOND_ORDERS};
 use crate::utilities::{capitalize_first};
 
@@ -380,6 +381,31 @@ pub fn atom_to_smiles(atom: &Atom, brackets: bool) -> String {
     }
 }
 
+/// Converts a bond into its SMILES representation.
+pub fn bond_to_smiles(smiles: &str, bond: &DirectedBond) -> Result<String, EncoderError> {
+    match bond.order {
+        1.0 => {
+            if let Some(stereo) = bond.stereo {
+                return Ok(stereo.to_string());
+            } else {
+                return Ok(String::new());
+            }
+        },
+        2.0 => {return Ok(String::from("="));},
+        3.0 => {return Ok(String::from("#"));},
+        _ => {
+            return Err(
+                EncoderError::UnexpectedBondOrder {
+                    smiles: smiles.to_string(),
+                    message: format!("Unexpected bond order: '{}'", bond.order),
+                    src: bond.src,
+                    dst: bond.dst,
+                }
+            )
+        },
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -511,5 +537,34 @@ mod tests {
             ]
         );
         assert_eq!(tokens, expected_tokens);
+    }
+
+    #[test]
+    fn test_bond_to_smiles() {
+        let bond = DirectedBond::new(0, 1, 1.0, Some('/'), false);
+        let x = bond_to_smiles("", &bond);
+        assert!(x.is_ok());
+        assert_eq!(x.unwrap(), String::from("/"));
+
+        let bond = DirectedBond::new(0, 1, 1.0, Some('\\'), false);
+        let x = bond_to_smiles("", &bond);
+        assert!(x.is_ok());
+        assert_eq!(x.unwrap(), String::from("\\"));
+
+        let bond = DirectedBond::new(0, 1, 2.0, Some('\\'), false);
+        let x = bond_to_smiles("", &bond);
+        assert!(x.is_ok());
+        assert_eq!(x.unwrap(), String::from("="));
+
+        let bond = DirectedBond::new(0, 1, 3.0, Some('\\'), false);
+        let x = bond_to_smiles("", &bond);
+        assert!(x.is_ok());
+        assert_eq!(x.unwrap(), String::from("#"));
+
+        // An aromatic bond is unexpected, and an unexpected bond order raises an error.
+        let bond = DirectedBond::new(0, 1, 1.5, Some('\\'), false);
+        let x = bond_to_smiles("", &bond);
+        assert!(x.is_err());
+        assert!(matches!(x.unwrap_err(), EncoderError::UnexpectedBondOrder { smiles: _, message: _, src: _, dst: _ }));
     }
 }
